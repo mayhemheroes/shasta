@@ -1,0 +1,7 @@
+project: shasta
+target: shasta
+timeout: 300
+
+cmds:
+  - cmd: /repo/build/staticExecutable/shasta --config Nanopore-May2022 --input /test.fa --assemblyDirectory in
+    filepath: /test.fa
