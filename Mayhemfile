@@ -4,3 +4,4 @@ duration: 300
 
 cmds:
   - cmd: /shasta --config Nanopore-May2022 --input @@ --assemblyDirectory in
+    filepath: /test.fa
