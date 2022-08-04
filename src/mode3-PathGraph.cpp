@@ -1,16 +1,24 @@
 // Shasta.
 #include "mode3-PathGraph.hpp"
+#include "findLinearChains.hpp"
 #include "orderPairs.hpp"
+#include "transitiveReduction.hpp"
 using namespace shasta;
 using namespace mode3;
 
 // Boost libraries.
 #include <boost/graph/iteration_macros.hpp>
+#include <boost/graph/strong_components.hpp>
+#include <boost/icl/interval_set.hpp>
 
 // Standard library.
+#include "fstream.hpp"
 #include "iostream.hpp"
 #include <queue>
 #include <stack>
+
+#include "MultithreadedObject.tpp"
+template class MultithreadedObject<mode3::PathGraph>;
 
 
 
@@ -33,9 +41,51 @@ PathGraph::PathGraph(const AssemblyGraph& assemblyGraph) :
     cout << "The initial path graph has " << num_vertices(pathGraph) <<
         " vertices and " << num_edges(pathGraph) << " edges." << endl;
 
+    computeJourneys();
+    writeJourneys("PathGraphJourneys.csv");
+
     // Partition the PathGraph into subgraphs.
     partition(partitionMaxDistance, minSubgraphSize);
     writeGfa("PathGraph");
+    writeCsvDetailed("PathGraphDetailed.csv");
+
+    // Interactive local detangling, without modifying the PathGraph.
+    while(true) {
+        int64_t subgraphId;
+        cout << "Enter a subgraph to detangle interactively, -1 to quit, or -2 to continue with detangle:" << endl;
+        cin >> subgraphId;
+        if(not cin) {
+            return;
+        }
+        if(subgraphId == -1) {
+            return;
+        }
+        if(subgraphId == -2) {
+            break;
+        }
+        vector<PathGraphVertex> newVertices;
+        detangleSubgraph(uint64_t(subgraphId), newVertices, true);
+        cout << "Detangling subgraph " << subgraphId <<
+            " generated " << newVertices.size() << " new vertices." << endl;
+    }
+
+    // Detangle iteration.
+    vector<PathGraphVertex> newVertices;
+    detangle(newVertices);
+    cout << "Detangle iteration created " << newVertices.size() << " new vertices." << endl;
+    clear();
+    createVertices(newVertices);
+    createEdges(minCoverage);
+    cout << "After one detangle iteration, the path graph has " << num_vertices(pathGraph) <<
+        " vertices and " << num_edges(pathGraph) << " edges." << endl;
+
+    computeJourneys();
+    writeJourneys("PathGraphJourneys-1.csv");
+
+    // Partition the PathGraph into subgraphs.
+    // partition(partitionMaxDistance, minSubgraphSize);
+    writeGfa("PathGraph-1");
+    writeCsvDetailed("PathGraphDetailed-1.csv");
 }
 
 
@@ -69,10 +119,25 @@ void PathGraph::createVertices() {
             interval.orientedReadId = orientedReadId;
             interval.first = position;
             interval.last = position;
-            vertex.journeyIntervals.push_back(interval);
+            vertex.journeyIntervals.push_back(
+                make_pair(interval, std::numeric_limits<uint64_t>::max()));
         }
     }
 
+}
+
+
+// Creation of vertices after a detangle iteration.
+void PathGraph::createVertices(const vector<PathGraphVertex>& newVertices)
+{
+    PathGraph& pathGraph = *this;
+
+    nextVertexId = 0;
+    for(const PathGraphVertex& newVertex: newVertices) {
+        const vertex_descriptor v = boost::add_vertex(newVertex, pathGraph);
+        PathGraphVertex& vertex = pathGraph[v];
+        vertex.id = nextVertexId++;
+    }
 }
 
 
@@ -87,7 +152,8 @@ void PathGraph::createEdges(uint64_t minCoverage)
     vector< vector<pair<AssemblyGraphJourneyInterval, vertex_descriptor> > >
         journeyIntervals(2 * assemblyGraph.readCount());
     BGL_FORALL_VERTICES(v, pathGraph, PathGraph) {
-        for(const AssemblyGraphJourneyInterval& interval: pathGraph[v].journeyIntervals) {
+        for(const auto& p: pathGraph[v].journeyIntervals) {
+            const AssemblyGraphJourneyInterval& interval = p.first;
             journeyIntervals[interval.orientedReadId.getValue()].push_back(
                 make_pair(interval, v));
         }
@@ -97,7 +163,6 @@ void PathGraph::createEdges(uint64_t minCoverage)
             OrderPairsByFirstOnly<AssemblyGraphJourneyInterval, vertex_descriptor>());
     }
 
-
     // Create the edges.
     for(const auto& orientedReadJourneyIntervals: journeyIntervals) {
 
@@ -105,14 +170,16 @@ void PathGraph::createEdges(uint64_t minCoverage)
             const vertex_descriptor v0 = orientedReadJourneyIntervals[i-1].second;
             const vertex_descriptor v1 = orientedReadJourneyIntervals[i  ].second;
 
-            edge_descriptor e;
-            bool edgeExists = false;
-            tie(e, edgeExists) = edge(v0, v1, pathGraph);
-            if(not edgeExists) {
-                tie(e, edgeExists) = add_edge(v0, v1, pathGraph);
-                SHASTA_ASSERT(edgeExists);
+            if(v0 != v1) {
+                edge_descriptor e;
+                bool edgeExists = false;
+                tie(e, edgeExists) = edge(v0, v1, pathGraph);
+                if(not edgeExists) {
+                    tie(e, edgeExists) = add_edge(v0, v1, pathGraph);
+                    SHASTA_ASSERT(edgeExists);
+                }
+                ++pathGraph[e].coverage;
             }
-            ++pathGraph[e].coverage;
         }
     }
 
@@ -127,6 +194,88 @@ void PathGraph::createEdges(uint64_t minCoverage)
     }
     for(const edge_descriptor e: edgesToBeRemoved) {
         boost::remove_edge(e, pathGraph);
+    }
+}
+
+
+
+// Compute the journeys of all oriented reads in the PathGraph.
+// The journey of an oriented read in the PathGraph is
+// a sequence of vertex descriptors which is not necessarily a path.
+// Indexed by OrientedReadId::getValue();
+void PathGraph::computeJourneys()
+{
+    PathGraph& pathGraph = *this;
+    const ReadId readCount = ReadId(assemblyGraph.readCount());
+
+    // First create, for each oriented read, a vector
+    // of pairs (AssemblyGraphJourneyInterval, vertex_descriptor).
+    vector< vector< pair<AssemblyGraphJourneyInterval, vertex_descriptor> > >
+        journeyTable(2 * readCount);
+    BGL_FORALL_VERTICES(v, pathGraph, PathGraph) {
+        for(const auto& p: pathGraph[v].journeyIntervals) {
+            const AssemblyGraphJourneyInterval& journeyInterval = p.first;
+            journeyTable[journeyInterval.orientedReadId.getValue()].push_back(make_pair(journeyInterval, v));
+        }
+    }
+
+    // Sort them and sanity check.
+    for(vector< pair<AssemblyGraphJourneyInterval, vertex_descriptor> >& v: journeyTable) {
+        sort(v.begin(), v.end());
+
+        // Sanity check.
+        if(v.size() > 1) {
+            for(uint64_t i=1; i<v.size(); i++) {
+                const AssemblyGraphJourneyInterval& previous = v[i-1].first;
+                const AssemblyGraphJourneyInterval& current = v[i].first;
+                SHASTA_ASSERT(previous.last < current.first);
+            }
+        }
+    }
+
+
+    // Store what we got.
+    BGL_FORALL_VERTICES(v, pathGraph, PathGraph) {
+        pathGraph[v].journeyIntervals.clear();
+    }
+    journeys.clear();
+    journeys.resize(2 * readCount);
+    for(ReadId readId=0; readId<readCount; readId++) {
+        for(Strand strand=0; strand<2; strand++) {
+            const OrientedReadId orientedReadId(readId, strand);
+            const uint64_t index = orientedReadId.getValue();
+            for(uint64_t position=0; position<journeyTable[index].size(); position++) {
+                const auto& p = journeyTable[index][position];
+                const AssemblyGraphJourneyInterval& interval = p.first;
+                const vertex_descriptor v = p.second;
+                journeys[index].push_back(v);
+                pathGraph[v].journeyIntervals.push_back(make_pair(interval, position));
+            }
+        }
+    }
+}
+
+
+
+void PathGraph::writeJourneys(const string& fileName) const
+{
+    const PathGraph& pathGraph = *this;
+    ofstream csv(fileName);
+
+    // Loop over all oriented reads.
+    const ReadId readCount = ReadId(assemblyGraph.readCount());
+    for(ReadId readId=0; readId<readCount; readId++) {
+        for(Strand strand=0; strand<2; strand++) {
+            const OrientedReadId orientedReadId(readId, strand);
+            csv << orientedReadId << ",";
+
+            // Write the journey of this oriented read in the PathGraph.
+            const auto journey = journeys[orientedReadId.getValue()];
+            for(const vertex_descriptor v: journey) {
+                csv << pathGraph[v].id << ",";
+            }
+            csv << "\n";
+        }
     }
 }
 
@@ -240,6 +389,12 @@ void PathGraph::partition(
         if(not changesWereMade) {
             break;
         }
+    }
+
+
+    // Sort the vertex descriptors in each subgraph.
+    for(vector<vertex_descriptor>& subgraph: subgraphs) {
+        sort(subgraph.begin(), subgraph.end(), PathGraphOrderVerticesById(pathGraph));
     }
 
 
@@ -381,9 +536,11 @@ void PathGraph::writeGfa(const string& baseName) const
 
     // Open the csv and write the header.
     ofstream csv(baseName + ".csv");
-    csv << "Segment,Color,SubgraphId\n";
+    csv << "PathGraph-VertexId,Color,SubgraphId\n";
 
-    // Write each vertex as a segment.
+    // Write each vertex as a segment in the gfa.
+    // Note these segments are different from assembly graph segments:
+    // here each segment represents a vertex of the path graph.
     BGL_FORALL_VERTICES(v, pathGraph, PathGraph) {
         gfa <<
             "S\t" <<
@@ -421,6 +578,808 @@ void PathGraph::writeGfa(const string& baseName) const
             "L\t" <<
             pathGraph[v0].id << "\t+\t" <<
             pathGraph[v1].id << "\t+\t0M\n";
+    }
+
+}
+
+
+
+void PathGraph::writeCsvDetailed(const string& fileName) const
+{
+    const PathGraph& pathGraph = *this;
+    ofstream csv(fileName);
+    csv << "PathGraph-VertexId,SubgraphId,SegmentId\n";
+
+    // Loop over vertices of the PathGraph.
+    BGL_FORALL_VERTICES(v, pathGraph, PathGraph) {
+        const PathGraphVertex& vertex = pathGraph[v];
+
+        // Write the AssemblyGraph path corresponding to this vertex.
+        for(const uint64_t segmentId: vertex.path) {
+            csv << vertex.id << "," << vertex.subgraphId << "," << segmentId << "\n";
+        }
+    }
+}
+
+
+
+// Detangling of a subgraph.
+// Returns new vertices for the next detangle iteration.
+// The new vertices can only be used in a new PathGraph
+// created from scratch.
+// Only the path and journeyIntervals are filled in.
+void PathGraph::detangleSubgraph(
+    uint64_t subgraphId,
+    vector<PathGraphVertex>& newVertices,
+    bool debug
+) const
+{
+    const vector<vertex_descriptor>& subgraph = subgraphs[subgraphId];
+
+    if(subgraph.empty()) {
+        newVertices.clear();
+        if(debug) {
+            cout << "The subgraph to be detangled is empty." << endl;
+        }
+        return;
+    }
+
+    // Call the templated function appropriate for the
+    // size of this subgraph. This way we use the shortest possible
+    // bitmap (with size multiple of 64).
+    if(subgraph.size() <= 64) {
+        detangleSubgraphTemplate<64>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 128) {
+        detangleSubgraphTemplate<128>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 192) {
+        detangleSubgraphTemplate<192>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 256) {
+        detangleSubgraphTemplate<256>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 320) {
+        detangleSubgraphTemplate<320>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 384) {
+        detangleSubgraphTemplate<384>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 448) {
+        detangleSubgraphTemplate<448>(subgraphId, newVertices, debug);
+    } else if(subgraph.size() <= 512) {
+        detangleSubgraphTemplate<512>(subgraphId, newVertices, debug);
+    } else {
+        SHASTA_ASSERT(0);
+    }
+}
+
+
+// This code is similar to mode3::AssemblyGraph::analyzeSubgraphTemplate
+// but it operates on a subgraph of the PathGraph, not of the AssemblyGraph.
+template<uint64_t N> void PathGraph::detangleSubgraphTemplate(
+    uint64_t subgraphId,
+    vector<PathGraphVertex>& newVertices,
+    bool debug
+) const
+{
+    // EXPOSE WHEN CODE STABILIZES.
+    const double fractionThreshold = 0.05;
+    const uint64_t minVertexCoverage = 6;
+    const uint64_t minClusterCoverage = 6;
+
+    const PathGraph& pathGraph = *this;
+    const vector<vertex_descriptor>& subgraph = subgraphs[subgraphId];
+
+    // The bitmap type used to store which vertices are visited
+    // by each journey snippet.
+    using BitVector = std::bitset<N>;
+    SHASTA_ASSERT(subgraph.size() <= N);
+
+    if(debug) {
+        cout << "Detangling a PathGraph subgraph consisting of the following " <<
+            subgraph.size() << " vertices:" << endl;
+        for(const vertex_descriptor v: subgraph) {
+            cout << pathGraph[v].id << " ";
+        }
+        cout << endl;
+    }
+
+    // Sanity check: we expect the vertices in the subgraph to be sorted by vertex id.
+    SHASTA_ASSERT(std::is_sorted(subgraph.begin(), subgraph.end(),
+        PathGraphOrderVerticesById(pathGraph)));
+
+    // For vertices in the subgraph, gather triplets
+    // (orientedReadId, position in path graph journey, vertex_descriptor).
+    using Triplet = tuple<OrientedReadId, uint64_t, vertex_descriptor>;
+    vector<Triplet> triplets;
+    for(const vertex_descriptor v: subgraph) {
+        const PathGraphVertex& vertex = pathGraph[v];
+
+        // Loop over oriented reads that visit this vertex.
+        for(const pair<AssemblyGraphJourneyInterval, uint64_t>& p: vertex.journeyIntervals) {
+            const AssemblyGraphJourneyInterval& assemblyGraphJourneyInterval = p.first;
+            const uint64_t position = p.second;
+            const OrientedReadId orientedReadId = assemblyGraphJourneyInterval.orientedReadId;
+            triplets.push_back(Triplet(orientedReadId, position, v));
+        }
+    }
+    sort(triplets.begin(), triplets.end());
+
+    // Write the triplets.
+    if(debug) {
+        ofstream csv("Triplets.csv");
+        for(const Triplet& triplet: triplets) {
+            csv << get<0>(triplet) << ",";
+            csv << get<1>(triplet) << ",";
+            csv << pathGraph[get<2>(triplet)].id << "\n";
+        }
+    }
+
+
+
+    // Find streaks for the same OrientedReadId where the position
+    // increases by 1 each time.
+    // Each streak generates a PathGraphJourneySnippet.
+    vector<PathGraphJourneySnippet> snippets;
+    for(uint64_t i=0; i<triplets.size(); /* Increment later */) {
+        const OrientedReadId orientedReadId = get<0>(triplets[i]);
+
+        // Find this streak.
+        uint64_t streakBegin = i;
+        uint64_t streakEnd = streakBegin + 1;
+        for(; streakEnd<triplets.size(); streakEnd++) {
+            if(get<0>(triplets[streakEnd]) != orientedReadId) {
+                break;
+            }
+            if(get<1>(triplets[streakEnd]) != get<1>(triplets[streakEnd-1]) + 1) {
+                break;
+            }
+        }
+
+        // Add a snippet.
+        PathGraphJourneySnippet snippet;
+        snippet.orientedReadId = orientedReadId;
+        snippet.firstPosition = get<1>(triplets[streakBegin]);
+        for(uint64_t j=streakBegin; j!=streakEnd; ++j) {
+            snippet.vertices.push_back(get<2>(triplets[j]));
+        }
+        snippets.push_back(snippet);
+
+        // Prepare to process the next streak.
+        i = streakEnd;
+    }
+
+
+
+
+    // Write the snippets.
+    if(debug) {
+        ofstream csv("PathGraphJourneySnippets.csv");
+        csv << "SnippetIndex,OrientedReadId,First position,LastPosition,Vertices\n";
+        for(uint64_t snippetIndex=0; snippetIndex<snippets.size(); snippetIndex++) {
+            const PathGraphJourneySnippet& snippet = snippets[snippetIndex];
+            csv << snippetIndex << ",";
+            csv << snippet.orientedReadId << ",";
+            csv << snippet.firstPosition << ",";
+            csv << snippet.lastPosition() << ",";
+            for(const vertex_descriptor v: snippet.vertices) {
+                csv << pathGraph[v].id << ",";
+            }
+            csv << "\n";
+        }
+    }
+
+
+
+    // For each snippet, create a BitVector that describes the segments
+    // the snippet visits.
+    const uint64_t snippetCount = snippets.size();
+    vector<BitVector> bitVectors(snippetCount);
+    vector<uint64_t> bitVectorsPopCount(snippetCount);  // The number of bits set in each of the bit vectors.
+    for(uint64_t snippetIndex=0; snippetIndex<snippetCount; snippetIndex++) {
+        const PathGraphJourneySnippet& snippet = snippets[snippetIndex];
+        BitVector& bitVector = bitVectors[snippetIndex];
+
+        for(const vertex_descriptor v: snippet.vertices) {
+            auto it = lower_bound(subgraph.begin(), subgraph.end(), v, PathGraphOrderVerticesById(pathGraph));
+            SHASTA_ASSERT(it != subgraph.end());
+            SHASTA_ASSERT(*it == v);
+            const uint64_t bitIndex = it - subgraph.begin();
+            bitVector.set(bitIndex);
+        }
+        bitVectorsPopCount[snippetIndex] = bitVector.count();
+    }
+
+
+
+    if(debug) {
+        ofstream csv("SnippetBitVector.csv");
+        csv << "Snippet,OrientedReadId,";
+        for(uint64_t i=0; i<subgraph.size(); i++) {
+            const vertex_descriptor v = subgraph[i];
+            csv << pathGraph[v].id << ",";
+        }
+        csv << "\n";
+        for(uint64_t snippetIndex=0; snippetIndex<snippetCount; snippetIndex++) {
+            const PathGraphJourneySnippet& snippet = snippets[snippetIndex];
+            csv << snippetIndex << ",";
+            csv << snippet.orientedReadId << ",";
+            const BitVector& bitVector = bitVectors[snippetIndex];
+            for(uint64_t i=0; i<subgraph.size(); i++) {
+                csv << bitVector[i] << ",";
+            }
+            csv << "\n";
+        }
+    }
+
+
+
+    // Create the SnippetGraph.
+    // A vertex represents a set of snippets and stores
+    // the corresponding snippet indexes.
+    // An edge x->y is created if there is at least one snippet in y
+    // that is an approximate subset of a snippet in x.
+    // We express this condition as |y-x| < fractionThreshold * |y|
+    // We start with one snippet per vertex.
+    SnippetGraph snippetGraph;
+    vector<SnippetGraph::vertex_descriptor> vertexTable;
+    std::map<SnippetGraph::vertex_descriptor, uint64_t> vertexMap;
+    for(uint64_t snippetIndex=0; snippetIndex<snippetCount; snippetIndex++) {
+        const auto v = add_vertex(SnippetGraphVertex(snippetIndex), snippetGraph);
+        vertexTable.push_back(v);
+        vertexMap.insert(make_pair(v, snippetIndex));
+    }
+    for(uint64_t iy=0; iy<snippetCount; iy++) {
+        const BitVector& y = bitVectors[iy];
+        const uint64_t threshold = uint64_t(std::round(fractionThreshold * double(bitVectorsPopCount[iy])));
+        const SnippetGraph::vertex_descriptor vy = vertexTable[iy];
+        for(uint64_t ix=0; ix<snippetCount; ix++) {
+            if(ix == iy) {
+                continue;
+            }
+            const BitVector& x = bitVectors[ix];
+
+            // Compute z = y-x.
+            BitVector z = y;
+            z &= (~x);
+
+            if(z.count() <= threshold) {
+                const SnippetGraph::vertex_descriptor vx = vertexTable[ix];
+                add_edge(vx, vy, snippetGraph);
+            }
+        }
+    }
+    if(debug) {
+        snippetGraph.writeGraphviz("SnippetGraph-Initial.dot");
+    }
+
+
+
+    // Compute strongly connected components of the SnippetGraph.
+    std::map<SnippetGraph::vertex_descriptor, uint64_t> componentMap;
+    const uint64_t componentCount = boost::strong_components(
+        snippetGraph,
+        boost::make_assoc_property_map(componentMap),
+        boost::vertex_index_map(boost::make_assoc_property_map(vertexMap)));
+    // cout << "Found " << componentCount << " strongly connected components." << endl;
+
+    // Gather the vertices of each strongly connected component.
+    vector< vector<SnippetGraph::vertex_descriptor> > components(componentCount);
+    BGL_FORALL_VERTICES_T(v, snippetGraph, SnippetGraph) {
+        const uint64_t componentId = componentMap[v];
+        SHASTA_ASSERT(componentId < componentCount);
+        components[componentId].push_back(v);
+    }
+    if(false) {
+        cout << "Strongly connected components:\n";
+        for(uint64_t componentId=0; componentId<componentCount; componentId++) {
+            cout << componentId << ": ";
+            for(const SnippetGraph::vertex_descriptor v: components[componentId]) {
+                cout << vertexMap[v] << " ";
+            }
+            cout << "\n";
+        }
+    }
+
+
+
+    // Condense the strongly connected components.
+    // After this, the SnippetGraph is guaranteed to be acyclic.
+    for(const vector<SnippetGraph::vertex_descriptor>& component: components) {
+        if(component.size() == 1) {
+            continue;
+        }
+
+        // Create a new vertex to represent this component.
+        const auto vNew = add_vertex(snippetGraph);
+        vector<uint64_t>& snippetsNew = snippetGraph[vNew].snippetIndexes;
+        for(const vertex_descriptor v: component) {
+            const vector<uint64_t>& snippets = snippetGraph[v].snippetIndexes;
+            SHASTA_ASSERT(snippets.size() == 1);
+            snippetsNew.push_back(snippets.front());
+        }
+
+        // Create the new edges.
+        for(const vertex_descriptor v0: component) {
+
+            // Out-edges.
+            BGL_FORALL_OUTEDGES_T(v0, e01, snippetGraph, SnippetGraph) {
+                const vertex_descriptor v1 = target(e01, snippetGraph);
+                if(v1 != vNew) {
+                    add_edge(vNew, v1, snippetGraph);
+                }
+            }
+
+            // In-edges.
+            BGL_FORALL_INEDGES_T(v0, e10, snippetGraph, SnippetGraph) {
+                const vertex_descriptor v1 = source(e10, snippetGraph);
+                if(v1 != vNew) {
+                    add_edge(v1, vNew, snippetGraph);
+                }
+            }
+        }
+
+        // Remove the old vertices and their edges.
+        for(const vertex_descriptor v: component) {
+            clear_vertex(v, snippetGraph);
+            remove_vertex(v, snippetGraph);
+        }
+    }
+
+
+
+    // Compute which maximal vertices each vertex is a descendant of.
+    std::map<SnippetGraph::vertex_descriptor, vector<SnippetGraph::vertex_descriptor> > ancestorMap;
+    BGL_FORALL_VERTICES_T(v0, snippetGraph, SnippetGraph) {
+        if(in_degree(v0, snippetGraph) != 0) {
+            continue;   // Not a maximal vertex.
+        }
+
+        // Find the descendants of this maximal vertex.
+        vector<vertex_descriptor> descendants;
+        snippetGraph.findDescendants(v0, descendants);
+
+        // Update the ancestor map.
+        for(const vertex_descriptor v1: descendants) {
+            ancestorMap[v1].push_back(v0);
+        }
+    }
+
+
+
+    // Each maximal vertex generates a cluster consisting of the vertices
+    // that descend from it and from no other maximal vertex.
+    // Gather the vertices in each cluster.
+    std::map<SnippetGraph::vertex_descriptor, vector<SnippetGraph::vertex_descriptor> > clusterMap;
+    uint64_t unclusterVertexCount = 0;
+    BGL_FORALL_VERTICES_T(v1, snippetGraph, SnippetGraph) {
+        const vector<SnippetGraph::vertex_descriptor>& ancestors = ancestorMap[v1];
+        if(ancestors.size() == 1) {
+            const vertex_descriptor v0 = ancestors.front();
+            clusterMap[v0].push_back(v1);
+        } else {
+            ++unclusterVertexCount;
+        }
+    }
+    if(debug or unclusterVertexCount>0) {
+        cout << "Subgraph " << subgraphId << " has " << unclusterVertexCount <<
+            " unclustered snippets out of " << snippetCount << " total." << endl;
+    }
+
+
+
+    // Gather the snippets in each cluster.
+    vector<PathGraphJourneySnippetCluster> clusters;
+    for(const auto& p: clusterMap) {
+        const vector<SnippetGraph::vertex_descriptor>& clusterVertices = p.second;
+        clusters.resize(clusters.size() + 1);
+        PathGraphJourneySnippetCluster& cluster = clusters.back();
+
+        vector<uint64_t> clusterSnippetIndexes; // Only used for debug output.
+        for(const SnippetGraph::vertex_descriptor v: clusterVertices) {
+            const vector<uint64_t>& snippetIndexes = snippetGraph[v].snippetIndexes;
+            for(const uint64_t snippetIndex: snippetIndexes) {
+                cluster.snippets.push_back(snippets[snippetIndex]);
+                clusterSnippetIndexes.push_back(snippetIndex);
+            }
+        }
+        cluster.constructVertices(pathGraph);
+        cluster.cleanupVertices(minVertexCoverage);
+        if(debug) {
+            cout << "Found a cluster candidate with " <<
+                clusterVertices.size() << " vertices and " <<
+                cluster.snippets.size() << " snippets:" << endl;
+            for(const uint64_t snippetIndex: clusterSnippetIndexes) {
+                cout << snippetIndex << " ";
+            }
+            cout << endl;
+        }
+
+        // If coverage on this cluster is too low, discard it.
+        if(cluster.coverage() < minClusterCoverage) {
+            clusters.resize(clusters.size() - 1);
+            if(debug) {
+                cout << "This cluster candidate was discarded because of low coverage." << endl;
+            }
+            continue;
+        }
+
+        // This cluster will be stored and is assigned this clusterId;
+        const uint64_t clusterId = clusters.size() - 1;
+
+        if(debug) {
+
+            cout << "This cluster was stored as cluster " << clusterId << endl;
+            cout << "Vertex(coverage) for this cluster:\n";
+            for(const auto& p: cluster.vertices) {
+                cout << pathGraph[p.first].id << "(" << p.second << ") ";
+            }
+            cout << endl;
+        }
+
+        // Mark the vertices of this cluster.
+        for(const SnippetGraph::vertex_descriptor v: clusterVertices) {
+            snippetGraph[v].clusterId = clusterId;
+        }
+    }
+    snippetGraph.clusterCount = clusters.size();
+
+
+
+
+    // Write out the SnippetGraph.
+    if(debug) {
+        snippetGraph.writeGraphviz("SnippetGraph.dot");
+    }
+
+
+
+    // Find the paths of each cluster.
+    // Each of these paths generates a new vertex for the next detangle iteration.
+    newVertices.clear();
+    if(debug) {
+        cout << "Kept " << clusters.size() << " clusters." << endl;
+    }
+    for(uint64_t clusterId=0; clusterId<clusters.size(); clusterId++) {
+        PathGraphJourneySnippetCluster& cluster = clusters[clusterId];
+        vector< vector<vertex_descriptor> > paths;
+        ofstream graphOut;
+        if(debug) {
+            graphOut.open("Cluster-" + to_string(clusterId) + ".dot");
+            cout << "Finding paths generated by cluster " << clusterId << endl;
+        }
+        findClusterPaths(cluster, paths, debug ? &graphOut : 0, debug);
+
+        // Construct the clusterSet for this cluster.
+        // It is set of all pairs (orientedReadId, vertex) covered by this cluster.
+        cluster.createClusterSet();
+
+        // For each path, generate a new vertex for the next detangle iteration.
+        for(const vector<vertex_descriptor>& path: paths) {
+            newVertices.emplace_back();
+            PathGraphVertex& newVertex = newVertices.back();
+
+            // Construct the assembly graph path for the new vertex.
+            for(const vertex_descriptor v: path) {
+                const PathGraphVertex& vertex = pathGraph[v];
+                copy(vertex.path.begin(), vertex.path.end(), back_inserter(newVertex.path));
+            }
+
+            // Intersect the clusterSet of this cluster with this path.
+            std::set<vertex_descriptor> pathVertices;
+            for(const vertex_descriptor v: path) {
+                pathVertices.insert(v);
+            }
+            std::set< pair<OrientedReadId, vertex_descriptor> > pathSet;
+            for(const auto& p: cluster.clusterSet) {
+                if(pathVertices.contains(p.second)) {
+                    pathSet.insert(p);
+                }
+            }
+
+            // Write out this pathSet.
+            if(debug) {
+                cout << "pathSet for this path:" << endl;
+                for(const auto& p: pathSet) {
+                    const OrientedReadId orientedReadId = p.first;
+                    const vertex_descriptor v = p.second;
+                    const PathGraphVertex& vertex = pathGraph[v];
+                    for(const pair<AssemblyGraphJourneyInterval, uint64_t>& p: vertex.journeyIntervals) {
+                        const AssemblyGraphJourneyInterval& interval = p.first;
+                        if(interval.orientedReadId == orientedReadId) {
+                            cout << orientedReadId << " " << interval.first << " " << interval.last << endl;
+                        }
+                    }
+                }
+            }
+
+            // Describe the pathSet as an interval map for each oriented read.
+            std::map< OrientedReadId, boost::icl::interval_set<uint64_t> > pathSetMap;
+            for(const auto& p: pathSet) {
+                const OrientedReadId orientedReadId = p.first;
+                const vertex_descriptor v = p.second;
+                const PathGraphVertex& vertex = pathGraph[v];
+                for(const pair<AssemblyGraphJourneyInterval, uint64_t>& p: vertex.journeyIntervals) {
+                    const AssemblyGraphJourneyInterval& assemblyGraphJourneyInterval = p.first;
+                    if(assemblyGraphJourneyInterval.orientedReadId == orientedReadId) {
+                        auto interval = boost::icl::interval<uint64_t>::right_open(
+                            assemblyGraphJourneyInterval.first,
+                            assemblyGraphJourneyInterval.last + 1);
+                        pathSetMap[orientedReadId].insert(interval);
+                    }
+                }
+            }
+            if(debug) {
+                cout << "pathSetMap:" << endl;
+                for(const auto& p: pathSetMap) {
+                    const OrientedReadId orientedReadId = p.first;
+                    const boost::icl::interval_set<uint64_t>& intervals = p.second;
+                    for(const auto& interval: intervals) {
+                        cout << orientedReadId << " " << interval.lower() << " " << interval.upper() << endl;
+                    }
+                }
+            }
+
+            // With this information we can construct the AssemblyGraphJourneyInterval's for the new vertex.
+            for(const auto& p: pathSetMap) {
+                const OrientedReadId orientedReadId = p.first;
+                const boost::icl::interval_set<uint64_t>& intervals = p.second;
+                for(const auto& interval: intervals) {
+                    AssemblyGraphJourneyInterval assemblyGraphJourneyInterval;
+                    assemblyGraphJourneyInterval.orientedReadId = orientedReadId;
+                    assemblyGraphJourneyInterval.first = interval.lower();
+                    assemblyGraphJourneyInterval.last = interval.upper() - 1;
+                    newVertex.journeyIntervals.push_back(make_pair(assemblyGraphJourneyInterval, invalid<uint64_t>));
+                }
+            }
+        }
+    }
+}
+
+
+
+// Detangle all the subgraphs.
+// This does not modify the PathGraph.
+// Instead, it creates vertices to be used for next detangle iteration.
+void PathGraph::detangle(vector<PathGraphVertex>& allNewVertices) const
+{
+    allNewVertices.clear();
+    vector<PathGraphVertex> newVertices;
+    for(uint64_t subgraphId=0; subgraphId<subgraphs.size(); subgraphId++) {
+        detangleSubgraph(subgraphId, newVertices, false);
+        copy(newVertices.begin(), newVertices.end(), back_inserter(allNewVertices));
+    }
+}
+
+
+
+// Construct a set of all pairs (orientedReadId, vertex) covered by this cluster.
+void PathGraphJourneySnippetCluster::createClusterSet()
+{
+    clusterSet.clear();
+    for(const PathGraphJourneySnippet& snippet: snippets) {
+        for(const PathGraphBaseClass::vertex_descriptor v: snippet.vertices) {
+            clusterSet.insert(make_pair(snippet.orientedReadId, v));
+        }
+    }
+}
+
+
+
+void SnippetGraph::findDescendants(
+    const vertex_descriptor vStart,
+    vector<vertex_descriptor>& descendants) const
+{
+    const SnippetGraph& graph = *this;
+
+    // Initialize the BFS.
+    std::queue<vertex_descriptor> q;
+    q.push(vStart);
+    std::set<vertex_descriptor> descendantsSet;
+    descendantsSet.insert(vStart);
+
+    // BFS loop.
+    while(not q.empty()) {
+        const vertex_descriptor v0 = q.front();
+        q.pop();
+
+        BGL_FORALL_OUTEDGES(v0, e01, graph, SnippetGraph) {
+            const vertex_descriptor v1 = target(e01, graph);
+            if(descendantsSet.find(v1) == descendantsSet.end()) {
+                q.push(v1);
+                descendantsSet.insert(v1);
+            }
+        }
+    }
+
+    descendants.clear();
+    copy(descendantsSet.begin(), descendantsSet.end(), back_inserter(descendants));
+}
+
+
+
+void SnippetGraph::writeGraphviz(
+    const string& fileName) const
+{
+    const SnippetGraph& graph = *this;
+
+    ofstream dot(fileName);
+    dot << "digraph SnippetGraph{\n"
+        "node [shape=rectangle];\n";
+    BGL_FORALL_VERTICES(v, graph, SnippetGraph) {
+        dot << "\"" << v << "\" [label=\"";
+        const vector<uint64_t>& snippetIndexes = graph[v].snippetIndexes;
+        for(const uint64_t snippetIndex: snippetIndexes) {
+            dot << snippetIndex;
+            dot << "\\n";
+        }
+        dot << "\"";
+        const uint64_t clusterId = graph[v].clusterId;
+        if(clusterId != invalid<uint64_t>) {
+            dot << " style=filled fillcolor=\"" <<
+                float(clusterId)/float(clusterCount) <<
+                ",0.3,1\"";
+        }
+        dot << "];\n";
+    }
+    BGL_FORALL_EDGES(e, graph, SnippetGraph) {
+        const vertex_descriptor vx = source(e, graph);
+        const vertex_descriptor vy = target(e, graph);
+        dot << "\"" << vx << "\"->\"" << vy << "\";\n";
+    }
+    dot << "}\n";
+
+}
+
+
+
+vector<PathGraphBaseClass::vertex_descriptor> PathGraphJourneySnippetCluster::getVertices() const
+{
+    vector<PathGraphBaseClass::vertex_descriptor> v;
+    for(const auto& p: vertices) {
+        v.push_back(p.first);
+    }
+    return v;
+}
+
+
+
+void PathGraphJourneySnippetCluster::cleanupVertices(uint64_t minVertexCoverage)
+{
+    vector< pair<PathGraphBaseClass::vertex_descriptor, uint64_t > > newVertices;
+    for(const auto& p: vertices) {
+        if(p.second >= minVertexCoverage) {
+            newVertices.push_back(p);
+        }
+    }
+    vertices.swap(newVertices);
+}
+
+
+
+void PathGraphJourneySnippetCluster::constructVertices(const PathGraph& pathGraph)
+{
+    // A map with Key=vertex_descriptor, value = coverage.
+    auto vertexMap = std::map<PathGraphBaseClass::vertex_descriptor, uint64_t, PathGraphOrderVerticesById>(
+        PathGraphOrderVerticesById(pathGraph));
+
+    for(const PathGraphJourneySnippet& snippet: snippets) {
+        for(const PathGraphBaseClass::vertex_descriptor v: snippet.vertices) {
+            auto it = vertexMap.find(v);
+            if(it == vertexMap.end()) {
+                vertexMap.insert(make_pair(v, 1));
+            } else {
+                ++(it->second);
+            }
+        }
+    }
+
+    vertices.clear();
+    copy(vertexMap.begin(), vertexMap.end(), back_inserter(vertices));
+}
+
+
+
+// Given a PathGraphJourneySnippetCluster, find a plausible
+// path for it in the PathGraph.
+void PathGraph::findClusterPaths(
+    const PathGraphJourneySnippetCluster& cluster,
+    vector< vector<vertex_descriptor> >& paths,
+    ostream* graphOut,
+    bool debug) const
+{
+    const PathGraph& pathGraph = *this;
+
+    // Map vertex descriptors to indexes in cluster.vertices.
+    std::map<vertex_descriptor, uint64_t> vertexMap;
+    for(uint64_t i=0; i<cluster.vertices.size(); i++) {
+        const vertex_descriptor v = cluster.vertices[i].first;
+        vertexMap.insert(make_pair(v, i));
+    }
+
+    // Construct the subgraph induced by the vertices of the cluster.
+    using Subgraph = boost::adjacency_list<boost::listS, boost::vecS, boost::bidirectionalS>;
+    Subgraph subgraph(vertexMap.size());
+    for(const auto& p: vertexMap) {
+        const vertex_descriptor v0 = p.first;
+        const uint64_t i0 = p.second;
+        BGL_FORALL_OUTEDGES(v0, e, pathGraph, PathGraph) {
+            const vertex_descriptor v1 = target(e, pathGraph);
+            const auto it = vertexMap.find(v1);
+            if(it == vertexMap.end()) {
+                continue;
+            }
+            const uint64_t i1 = it->second;
+            add_edge(i0, i1, subgraph);
+        }
+    }
+
+    // Compute strong connected components of this subgraph.
+    const auto indexMap = get(boost::vertex_index, subgraph);
+    vector<uint64_t> strongComponent(num_vertices(subgraph));
+    boost::strong_components(
+        subgraph,
+        boost::make_iterator_property_map(strongComponent.begin(), indexMap));
+
+    // Remove edges internal to strong components.
+    vector<Subgraph::edge_descriptor> edgesToBeRemoved;
+    BGL_FORALL_EDGES(e, subgraph, Subgraph) {
+        const uint64_t i0 = source(e, subgraph);
+        const uint64_t i1 = target(e, subgraph);
+        if(strongComponent[i0] == strongComponent[i1]) {
+            edgesToBeRemoved.push_back(e);
+        }
+    }
+    for(const Subgraph::edge_descriptor e: edgesToBeRemoved) {
+        boost::remove_edge(e, subgraph);
+    }
+
+    // Transitive reduction.
+    transitiveReduction(subgraph);
+
+
+    // Write it out.
+    if(graphOut) {
+        (*graphOut) << "digraph cluster {\n";
+        for(uint64_t i=0; i<vertexMap.size(); i++) {
+            const auto& p = cluster.vertices[i];
+            const vertex_descriptor v = p.first;
+            const uint64_t coverage = p.second;
+            (*graphOut) << pathGraph[v].id;
+            (*graphOut) << " [label=\"" << pathGraph[v].id << "\\n" << coverage << "\"]";
+            (*graphOut) << ";\n";
+        }
+        BGL_FORALL_EDGES(e, subgraph, Subgraph) {
+            const uint64_t i0 = source(e, subgraph);
+            const uint64_t i1 = target(e, subgraph);
+            const vertex_descriptor v0 = cluster.vertices[i0].first;
+            const vertex_descriptor v1 = cluster.vertices[i1].first;
+            (*graphOut) << pathGraph[v0].id << "->" << pathGraph[v1].id;
+            (*graphOut) << ";\n";
+        }
+        (*graphOut) << "}\n";
+
+    }
+
+
+    // Find linear chains of vertices.
+    vector< vector<Subgraph::vertex_descriptor> > chains;
+    findLinearVertexChains(subgraph, chains);
+    if(debug) {
+        cout << "Found the following paths:" << endl;
+        for(const vector<Subgraph::vertex_descriptor>& chain: chains) {
+            for(const Subgraph::vertex_descriptor v: chain) {
+                const PathGraph::vertex_descriptor u = cluster.vertices[v].first;
+                cout << pathGraph[u].id << " ";
+            }
+            cout << endl;
+        }
+    }
+
+    // Store a path for each chain.
+    paths.clear();
+    for(const vector<Subgraph::vertex_descriptor>& chain: chains) {
+        vector<PathGraph::vertex_descriptor> path;
+        for(const Subgraph::vertex_descriptor v: chain) {
+            const PathGraph::vertex_descriptor u = cluster.vertices[v].first;
+            path.push_back(u);
+        }
+        paths.push_back(path);
     }
 
 }

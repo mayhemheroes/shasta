@@ -1,6 +1,14 @@
+// Shasta.
 #include "MarkerGraph.hpp"
 #include "Coverage.hpp"
 using namespace shasta;
+
+// Standard library.
+#include "fstream.hpp"
+
+#include "MultithreadedObject.tpp"
+template class MultithreadedObject<MarkerGraph>;
+
 
 const MarkerGraph::VertexId MarkerGraph::invalidVertexId = std::numeric_limits<VertexId>::max();
 const MarkerGraph::EdgeId MarkerGraph::invalidEdgeId = std::numeric_limits<EdgeId>::max();

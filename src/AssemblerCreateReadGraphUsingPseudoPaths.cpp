@@ -1,11 +1,14 @@
-
 // Shasta.
 #include "Assembler.hpp"
 #include "AssemblyGraph.hpp"
 #include "orderPairs.hpp"
 #include "Reads.hpp"
 #include "seqan.hpp"
+#include "timestamp.hpp"
 using namespace shasta;
+
+// Standard library.
+#include "fstream.hpp"
 
 
 

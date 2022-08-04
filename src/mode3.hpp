@@ -17,6 +17,7 @@ number of transitions 0->1, we create a link 0->1.
 
 // Shasta.
 #include "hashArray.hpp"
+#include "invalid.hpp"
 #include "MemoryMappedVectorOfVectors.hpp"
 #include "MultithreadedObject.hpp"
 #include "ReadId.hpp"
@@ -27,6 +28,7 @@ number of transitions 0->1, we create a link 0->1.
 
 // Standard library.
 #include "array.hpp"
+#include "tuple.hpp"
 #include "unordered_map"
 #include "vector.hpp"
 
@@ -38,11 +40,14 @@ namespace shasta {
         class AssemblyGraphJourneyEntry;
         class MarkerGraphJourneyEntry;
         class AssemblyGraphJourneyInterval;
+
     }
 
     // Some forward declarations of classes in the shasta namespace.
     class CompressedMarker;
     class MarkerGraph;
+
+    extern template class MultithreadedObject<mode3::AssemblyGraph>;
 }
 
 
@@ -117,10 +122,12 @@ public:
     uint64_t first;
     uint64_t last;
 
+
     bool operator<(const AssemblyGraphJourneyInterval& that) const
     {
-        return first < that.first;
+        return tie(orientedReadId, first) < tie(that.orientedReadId, that.first);
     }
+
 };
 
 
@@ -241,10 +248,21 @@ public:
         uint64_t segmentId0;
         uint64_t segmentId1;
 
+        // Flag to indicate whether the two segments are adjacent.
+        // This is set if the last marker graph vertex of segmentId0
+        // is the same as the first marker graph vertex of segmentId1.
+        // In that case the separation will be set to 0.
+        // However, the separation is just an estimate, so it
+        // could be 0 even when the segments are ot adjacent.
+        bool segmentsAreAdjacent;
+
+        // Estimated separation in markers.
+        int32_t separation;
+
+
         Link(
             uint64_t segmentId0 = 0,
-            uint64_t segmentId1 = 0,
-            uint64_t coverage = 0) :
+            uint64_t segmentId1 = 0) :
             segmentId0(segmentId0),
             segmentId1(segmentId1) {}
     };
@@ -306,8 +324,22 @@ public:
         vector<uint64_t>& segmentIds
         ) const;
 
-    void writeGfa(const string& fileName) const;
-    void writeGfa(ostream&) const;
+    // BFS with given begin/end.
+    // Does a BFS which starts at segmentIdA.
+    // and ends when segmentIdB is encountered.
+    // The BFS if forward if direction is 0
+    // and backward if direction is 1.
+    // Computes a vector of all the segments encountered,
+    // excluding segmentIdA and segmentIdB,
+    // in the order in which they are encountered in the BFS.
+    void targetedBfs(
+        uint64_t segmentIdA,
+        uint64_t segmentIdB,
+        uint64_t direction,
+        vector<uint64_t>& segments
+        ) const;
+
+    void writeGfa(const string& baseName) const;
 
     // Find the distinct oriented reads that appear on the path
     // of a segment. Also return the average edge coverage for the path.
@@ -378,8 +410,7 @@ public:
         uint64_t commonCount = 0;
 
         // The offset of segment 1 relative to segment 0, in markers.
-        int64_t offset = std::numeric_limits<int64_t>::max();
-
+        int64_t offset = invalid<int64_t>;
 
         // The number of oriented reads present in each segment
         // but missing from the other segment,
@@ -525,7 +556,7 @@ public:
         class SnippetGraphVertex {
         public:
             vector<uint64_t> snippetIndexes;
-            uint64_t clusterId = std::numeric_limits<uint64_t>::max();
+            uint64_t clusterId = invalid<uint64_t>;
             SnippetGraphVertex() {}
             SnippetGraphVertex(uint64_t snippetIndex) :
                 snippetIndexes(1, snippetIndex) {}
@@ -551,10 +582,46 @@ public:
         vector<AnalyzeSubgraphClasses::Cluster>&,
         bool debug) const;
 
+    // Given a segment, use a BFS to move in the specified direction until
+    // we find a segment with sufficiently high Jaccard similarity
+    // and number of common reads.
+    // This returns invalid<uint64_t> if no such segment is found
+    // within the specified distance.
+    uint64_t findSimilarSegmentBfs(
+        uint64_t segmentId,
+        uint64_t direction, // 0 = forward, 1 = backward
+        uint64_t maxDistance,
+        uint64_t minCommon,
+        double minJaccard) const;
 
+    // Given a segment, move in the specified direction,
+    // in order of increasing distance in markers, until
+    // we find a segment with sufficiently high Jaccard similarity
+    // and number of common reads.
+    // This returns invalid<uint64_t> if no such segment is found
+    // within the specified distance.
+    uint64_t findSimilarSegment(
+        uint64_t segmentId,
+        uint64_t direction,     // 0 = forward, 1 = backward
+        uint64_t maxDistance,   // In markers
+        uint64_t minLinkCoverage,
+        uint64_t minCommon,
+        double maxUnexplainedFraction,
+        double minJaccard,
+        vector<uint64_t>& segments) const;
 
     // Create an assembly path starting at a given segment.
     void createAssemblyPath(
+        uint64_t segmentId,
+        uint64_t direction,    // 0 = forward, 1 = backward
+        vector<uint64_t>& path // The segmentId's of the path.
+        ) const;
+    void createAssemblyPath1(
+        uint64_t segmentId,
+        uint64_t direction,    // 0 = forward, 1 = backward
+        vector<uint64_t>& path // The segmentId's of the path.
+        ) const;
+    void createAssemblyPath2(
         uint64_t segmentId,
         uint64_t direction,    // 0 = forward, 1 = backward
         vector<uint64_t>& path // The segmentId's of the path.

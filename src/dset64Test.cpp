@@ -1,5 +1,6 @@
 // shasta.
 #include "dset64Test.hpp"
+#include "SHASTA_ASSERT.hpp"
 #include "vector.hpp"
 using namespace shasta;
 
@@ -12,6 +13,8 @@ using namespace shasta;
 #include "iterator.hpp"
 #include <random>
 
+#include "MultithreadedObject.tpp"
+template class MultithreadedObject<Dset64Test>;
 
 
 void shasta::dset64Test(

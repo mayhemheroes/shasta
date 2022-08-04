@@ -2,20 +2,22 @@
 // Shasta.
 #include "Assembler.hpp"
 #include "AssemblyGraph.hpp"
+#include "filesystem.hpp"
 #include "Coverage.hpp"
 #include "buildId.hpp"
-#include "filesystem.hpp"
 #include "platformDependent.hpp"
 #include "Reads.hpp"
 using namespace shasta;
 
 // Boost libraries.
+#include <boost/tokenizer.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
 // Standard library.
 #include <filesystem>
+#include "fstream.hpp"
 
 
 // A map containing descriptions of output files.
@@ -257,7 +259,7 @@ void Assembler::processRequest(
 {
     // Process a documentation request.
     const string& keyword = request.front();
-    
+
     if(keyword.size()>6 && keyword.substr(0, 6)=="/docs/") {
 
         // Extract the file name.
@@ -464,7 +466,7 @@ void Assembler::writeNavigation(ostream& html) const
             {"Meta-alignments", "exploreMode3MetaAlignment"},
             });
     }
-    
+
     if (!httpServerData.docsDirectory.empty()) {
         writeNavigation(html, "Help", {
             {"Documentation", "docs/index.html"},
@@ -525,7 +527,7 @@ void Assembler::writePngToHtml(
     html << "\"/>";
 
     // Remove the base64 file.
-    filesystem::remove(base64FileName);
+    std::filesystem::remove(base64FileName);
 
 }
 
@@ -1530,7 +1532,7 @@ void Assembler::writeAssemblyIndex(ostream& html) const
     // Loop over files in the assembly directory,
     // in case-insensitive alphabetic order.
     vector<string> assemblyFiles = shasta::filesystem::directoryContents(".");
-    sort(assemblyFiles.begin(), assemblyFiles.end(),
+    std::ranges::sort(assemblyFiles,
         [](const string& s1, const string& s2) {
         return lexicographical_compare(
         s1.begin(), s1.end(),
@@ -1704,7 +1706,7 @@ void Assembler::blastRead(
         }
 
         // Sort by score.
-        sort(alignments.begin(), alignments.end(),
+        std::ranges::sort(alignments,
             std::greater< pair<double, vector<string> > >());
 
         // Write it out.
@@ -1770,9 +1772,9 @@ void Assembler::blastRead(
 
 
     // Remove the files we created.
-    filesystem::remove(fastaFileName);
-    filesystem::remove(blastOutputFileName);
-    filesystem::remove(blastErrFileName);
+    std::filesystem::remove(fastaFileName);
+    std::filesystem::remove(blastOutputFileName);
+    std::filesystem::remove(blastErrFileName);
 }
 
 

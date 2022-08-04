@@ -13,6 +13,7 @@
 using namespace shasta;
 
 // Boost libraries.
+#include <boost/algorithm/string.hpp>
 #include <boost/graph/iteration_macros.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
@@ -23,6 +24,8 @@ using namespace shasta;
 
 // Standard library.
 #include "chrono.hpp"
+#include "filesystem.hpp"
+#include "fstream.hpp"
 #include "iterator.hpp"
 #include <queue>
 
@@ -130,7 +133,7 @@ void Assembler::exploreMarkerGraph(
         const int exitStatus = WEXITSTATUS(commandStatus);
         if(exitStatus == 124) {
             html << "<p>Timeout for graph layout exceeded. Increase the timeout or reduce the maximum distance from the start vertex.";
-            filesystem::remove(dotFileName);
+            std::filesystem::remove(dotFileName);
             return;
         }
         else if(exitStatus!=0 && exitStatus!=1) {    // sfdp returns 1 all the time just because of the message about missing triangulation.
@@ -145,7 +148,7 @@ void Assembler::exploreMarkerGraph(
 
     }
     // Remove the .dot file.
-    filesystem::remove(dotFileName);
+    std::filesystem::remove(dotFileName);
 
 
 
@@ -284,7 +287,7 @@ void Assembler::exploreMarkerGraph(
     svgFile.close();
 
     // Remove the .svg file.
-    filesystem::remove(svgFileName);
+    std::filesystem::remove(svgFileName);
 
     // Scale to desired size, then make it visible.
     html <<
@@ -1263,7 +1266,7 @@ void Assembler::exploreMarkerGraphEdge(const vector<string>& request, ostream& h
         markerGraph.edgeConsensus.isOpen() and
         markerGraph.edgeConsensusOverlappingBaseCount.isOpen;
     int storedConsensusOverlappingBaseCount = 0;
-    span< pair<Base, uint8_t> > storedConsensus(0, 0);
+    span< pair<Base, uint8_t> > storedConsensus;
     if(consensusIsAvailable)   {
         storedConsensusOverlappingBaseCount = int(markerGraph.edgeConsensusOverlappingBaseCount[edgeId]);
         storedConsensus = markerGraph.edgeConsensus[edgeId];
@@ -1277,14 +1280,15 @@ void Assembler::exploreMarkerGraphEdge(const vector<string>& request, ostream& h
     vector<uint32_t> spoaRepeatCounts;
     uint8_t spoaOverlappingBaseCount;
     ComputeMarkerGraphEdgeConsensusSequenceUsingSpoaDetail spoaDetail;
-    
+
     const spoa::AlignmentType alignmentType = spoa::AlignmentType::kNW;
     const int8_t match = 1;
     const int8_t mismatch = -1;
     const int8_t gap = -1;
-    auto spoaAlignmentEngine = spoa::createAlignmentEngine(alignmentType, match, mismatch, gap);
-    auto spoaAlignmentGraph = spoa::createGraph();
-    
+    auto spoaAlignmentEngine = spoa::AlignmentEngine::Create(alignmentType, match, mismatch, gap);
+    spoa::Graph spoaAlignmentGraph = {};
+    spoaAlignmentGraph.Clear();
+
     computeMarkerGraphEdgeConsensusSequenceUsingSpoa(
         edgeId,
         markerGraphEdgeLengthThresholdForConsensus,
@@ -2177,7 +2181,7 @@ void Assembler::exploreMarkerConnectivity(
         const int exitStatus = WEXITSTATUS(commandStatus);
         if(exitStatus == 124) {
             html << "<p>Timeout for graph layout exceeded.";
-            filesystem::remove(dotFileName);
+            std::filesystem::remove(dotFileName);
             return;
         }
         else if(exitStatus!=0) {
@@ -2192,7 +2196,7 @@ void Assembler::exploreMarkerConnectivity(
     }
 
     // Remove the .dot file.
-    filesystem::remove(dotFileName);
+    std::filesystem::remove(dotFileName);
 
     // Buttons to resize the svg locally.
     const int sizePixels = 800;
@@ -2216,6 +2220,6 @@ void Assembler::exploreMarkerConnectivity(
         "</script>";
 
     // Remove the .svg file.
-    filesystem::remove(svgFileName);
+    std::filesystem::remove(svgFileName);
 }
 

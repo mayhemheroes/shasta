@@ -193,6 +193,12 @@ void mode3::LocalAssemblyGraph::writeHtml(ostream& html, const SvgOptions& optio
             segmentId = inputField.value;
             inputField.value = "";
 
+            zoomToGivenSegment(segmentId);
+        }
+
+        function zoomToGivenSegment(segmentId)
+        {
+
             // Find the bounding box and its center.
             var element = document.getElementById("Segment-" + segmentId);
             var box = element.getBBox();
@@ -216,6 +222,21 @@ void mode3::LocalAssemblyGraph::writeHtml(ostream& html, const SvgOptions& optio
         <p>Zoom to segment
         <input id=zoomInputField type=text onchange="zoomToSegment()" size=10>
         )stringDelimiter";
+
+
+
+    // Initial zoom to segment of interest.
+    if(options.segmentColoring == "path") {
+        html << "\n<script>zoomToGivenSegment(" << options.pathStart << ");</script>\n";
+    }
+    if(
+        options.segmentColoring == "byCommonReads" or
+        options.segmentColoring == "byJaccard" or
+        options.segmentColoring == "byUnexplainedFractionOnReferenceSegment" or
+        options.segmentColoring == "byUnexplainedFractionOnDisplayedSegment"
+        ) {
+        html << "\n<script>zoomToGivenSegment(" << options.referenceSegmentId << ");</script>\n";
+    }
 
 
 
@@ -345,11 +366,10 @@ function onMouseExitSegment()
         function segmentThickness(factor)
         {
             const group = document.getElementById('LocalAssemblyGraph-segments');
-            for (let i=0; i<group.children.length; i++) {
-                path = group.children[i];
-                if(path.tagName == 'path') {
-                    path.setAttribute('stroke-width', factor * path.getAttribute('stroke-width'));
-                }
+            descendants = group.querySelectorAll("path");
+            for (let i=0; i<descendants.length; i++) {
+                path = descendants[i];
+                path.setAttribute('stroke-width', factor * path.getAttribute('stroke-width'));
             }
         }
         </script>
@@ -507,12 +527,36 @@ void mode3::LocalAssemblyGraph::writeSvg(
     }
 
 
-    std::set<uint64_t> pathSegments;
+    std::map<uint64_t, vector<uint64_t> > pathSegments; // map(segmentId, positionsInPath).
+    vector<uint64_t> path;
     if(options.segmentColoring == "path") {
-        vector<uint64_t> path;
-        assemblyGraph.createAssemblyPath(options.pathStart, options.pathDirection, path);
-        for(const uint64_t segmentId: path) {
-            pathSegments.insert(segmentId);
+        if(options.pathDirection=="forward" or options.pathDirection=="backward") {
+            // Forward or backward.
+            assemblyGraph.createAssemblyPath(options.pathStart,
+                (options.pathDirection == "forward") ? 0 : 1, path);
+        } else {
+            // Bidirectional.
+            vector<uint64_t> forwardPath;
+            vector<uint64_t> backwardPath;
+            assemblyGraph.createAssemblyPath(options.pathStart, 0, forwardPath);
+            assemblyGraph.createAssemblyPath(options.pathStart, 1, backwardPath);
+            // Stitch them together, making sure not to repeat the starting segment.
+            path.clear();
+            copy(backwardPath.rbegin(), backwardPath.rend(), back_inserter(path));
+            copy(forwardPath.begin() + 1, forwardPath.end(), back_inserter(path));
+        }
+        for(uint64_t position=0; position<path.size(); position++) {
+            const uint64_t segmentId = path[position];
+            pathSegments[segmentId].push_back(position);
+        }
+        svg << "\nFound a " << options.pathDirection <<
+            " path of length " << path.size() << " starting at segment " << path.front() <<
+            " and ending at segment " << path.back() << "<br>";
+
+        ofstream csv("Path.csv");
+        csv << "Position,SegmentId\n";
+        for(uint64_t position=0; position<path.size(); position++) {
+            csv << position << "," << path[position] << "\n";
         }
     }
 
@@ -603,6 +647,7 @@ void mode3::LocalAssemblyGraph::writeSvg(
     svg << "<g id='" << svgId << "-links'>\n";
     BGL_FORALL_EDGES(e, localAssemblyGraph, LocalAssemblyGraph) {
         const uint64_t linkId = localAssemblyGraph[e].linkId;
+        const AssemblyGraph::Link& link = assemblyGraph.links[linkId];
 
         // Access the LocalAssemblyGraph vertices corresponding to
         // the two segments of this Link and extract some information
@@ -613,7 +658,6 @@ void mode3::LocalAssemblyGraph::writeSvg(
         const LocalAssemblyGraphVertex& vertex2 = localAssemblyGraph[v2];
         const uint64_t segmentId1 = vertex1.segmentId;
         const uint64_t segmentId2 = vertex2.segmentId;
-        const bool areConsecutivePaths = haveConsecutivePaths(v1, v2);
 
         // Get the positions of the ends of this link.
         SHASTA_ASSERT(vertex1.position.size() >= 2);
@@ -638,7 +682,7 @@ void mode3::LocalAssemblyGraph::writeSvg(
             options.additionalLinkThicknessPerRead * double(assemblyGraph.linkCoverage(linkId) - 1);
 
         const string dash =
-            areConsecutivePaths ? "" :
+            link.segmentsAreAdjacent ? "" :
             " stroke-dasharray='0 " + to_string(1.5 * linkThickness) + "'";
 
 
@@ -650,6 +694,7 @@ void mode3::LocalAssemblyGraph::writeSvg(
             " from segment " << segmentId1 <<
             " to segment " << segmentId2 <<
             ", coverage " << assemblyGraph.linkCoverage(linkId) <<
+            ", separation " << link.separation <<
             "</title>"
             "<path d="
             "'M " << p1.x() << " " << p1.y() <<
@@ -766,10 +811,21 @@ void mode3::LocalAssemblyGraph::writeSvg(
                     }
                 }
             } else if(options.segmentColoring == "path") {
-                if(pathSegments.find(segmentId) == pathSegments.end()) {
+                auto it = pathSegments.find(segmentId);
+                if(it == pathSegments.end()) {
                     color = "Black";
                 } else {
-                    color = "Green";
+                    const auto positions = it->second;
+                    SHASTA_ASSERT(not positions.empty());
+                    if(positions.size() == 1) {
+                        const uint64_t positionInPath = positions.front();
+                        const uint32_t hue = uint32_t(
+                            std::round(240. * double(positionInPath) / double(path.size())));
+                        color = "hsl(" + to_string(hue) + ",100%, 50%)";
+                    } else {
+                        // This segment appears more than once on the path.
+                        color = "Fuchsia";
+                    }
                 }
             } else {
                 color = "Black";
@@ -802,6 +858,21 @@ void mode3::LocalAssemblyGraph::writeSvg(
         const auto& segmentPairInfo = segmentPairInformationTable[v];
         const auto oldPrecision = svg.precision(1);
         const auto oldFlags = svg.setf(std::ios_base::fixed, std::ios_base::floatfield);
+
+        if(options.segmentColoring == "path") {
+            svg << "<g>";
+            auto it = pathSegments.find(segmentId);
+            if(it != pathSegments.end()) {
+                const auto positions = it->second;
+                SHASTA_ASSERT(not positions.empty());
+                svg << "<title>";
+                for(const uint64_t position: positions) {
+                    svg << position << " ";
+                }
+                svg << "</title>";
+            }
+        }
+
         /*
         svg <<
             "<g>"
@@ -862,6 +933,9 @@ void mode3::LocalAssemblyGraph::writeSvg(
             "\n";
         svg.precision(oldPrecision);
         svg.flags(oldFlags);
+        if(options.segmentColoring == "path") {
+            svg << "</g>";
+        }
     }
     svg << "</g>\n";
 
@@ -912,13 +986,16 @@ void mode3::LocalAssemblyGraph::computeLayout(
     BGL_FORALL_EDGES(e, localAssemblyGraph, LocalAssemblyGraph) {
         const vertex_descriptor v1 = source(e, localAssemblyGraph);
         const vertex_descriptor v2 = target(e, localAssemblyGraph);
+        const LocalAssemblyGraphEdge& edge = localAssemblyGraph[e];
+        const uint64_t linkId = edge.linkId;
+        const AssemblyGraph::Link& link = assemblyGraph.links[linkId];
 
         double edgeLength;
-        if(haveConsecutivePaths(v1, v2)) {
+        if(link.segmentsAreAdjacent) {
             edgeLength = options.minimumLinkLength;
         } else {
-            const double linkSeparation = max(this->linkSeparation(e), 0.);
-            edgeLength = 3. * options.minimumLinkLength + linkSeparation * options.additionalLinkLengthPerMarker;
+            const int32_t linkSeparation = max(link.separation, 0);
+            edgeLength = 3. * options.minimumLinkLength + double(linkSeparation) * options.additionalLinkLengthPerMarker;
         }
         G::edge_descriptor eAuxiliary;
         tie(eAuxiliary, ignore) = add_edge(
@@ -1118,21 +1195,11 @@ bool LocalAssemblyGraph::haveConsecutivePaths(
 
 // Return the average link separation for the Link
 // described by an edge.
-double LocalAssemblyGraph::linkSeparation(edge_descriptor e) const
+int32_t LocalAssemblyGraph::linkSeparation(edge_descriptor e) const
 {
     const LocalAssemblyGraph& localAssemblyGraph = *this;
-
-    // Get the path length of the first segment.
-    const vertex_descriptor v0 = source(e, localAssemblyGraph);
-    const LocalAssemblyGraphVertex& vertex0 = localAssemblyGraph[v0];
-    const uint64_t segmentId0 = vertex0.segmentId;
-    const auto path0 = assemblyGraph.paths[segmentId0];
-    const uint64_t pathLength0 = path0.size();
-
-    // Now we can compute the link separation.
     const uint64_t linkId = localAssemblyGraph[e].linkId;
-    return mode3::AssemblyGraph::linkSeparation(assemblyGraph.transitions[linkId], pathLength0);
-
+    return assemblyGraph.links[linkId].separation;
 }
 
 
@@ -1140,6 +1207,20 @@ double LocalAssemblyGraph::linkSeparation(edge_descriptor e) const
 // Construct the svg options from an html request.
 LocalAssemblyGraph::SvgOptions::SvgOptions(const vector<string>& request)
 {
+    // The initial layout method if set to "custom" if
+    // command "customLayout" is available, "neato" otherwise.
+    static bool firstTime = true;
+    static string layoutDefaultMethod = "neato";
+    if(firstTime) {
+        firstTime = false;
+        const string command = "which customLayout";
+        const int returnCode = system(command.c_str());
+        if(returnCode == 0) {
+            layoutDefaultMethod = "custom";
+        }
+    }
+    layoutMethod = layoutDefaultMethod;
+
     HttpServer::getParameterValue(request, "sizePixels", sizePixels);
     HttpServer::getParameterValue(request, "layoutMethod", layoutMethod);
 
@@ -1249,7 +1330,7 @@ void LocalAssemblyGraph::SvgOptions::addFormRows(ostream& html)
         // Segment coloring by Jaccard similarity with the reference segment.
         "<input type=radio name=segmentColoring value=byJaccard"
         << (segmentColoring=="byJaccard" ? " checked=checked" : "") <<
-        ">By Jaccard similarity with reference segment, withotu counting short reads"
+        ">By Jaccard similarity with reference segment, without counting short reads"
         "<br>"
 
         // Segment coloring by number of common reads with the reference segment.
@@ -1308,9 +1389,13 @@ void LocalAssemblyGraph::SvgOptions::addFormRows(ostream& html)
              ">Color an assembly path"
              "<br>"
              "Start the path at segment &nbsp;<input type=text name=pathStart size=8 style='text-align:center'"
-                     " value='" << pathStart << "'><br>"
-             "Direction (0=forward, 1=backward) &nbsp;<input type=text name=pathDirection size=8 style='text-align:center'"
-                     " value='" << pathDirection << "'><br>";
+                     " value='" << pathStart << "'>"
+             "<br><input type=radio name=pathDirection value=forward" <<
+             (pathDirection=="forward" ? " checked=checked" : "") << "> Forward"
+             "<br><input type=radio name=pathDirection value=backward" <<
+             (pathDirection=="backward" ? " checked=checked" : "") << "> Backward"
+             "<br><input type=radio name=pathDirection value=bidirectional" <<
+             (pathDirection=="bidirectional" ? " checked=checked" : "") << "> Both directions";
 
 
         html << "</table>"
@@ -1346,6 +1431,22 @@ void LocalAssemblyGraph::SvgOptions::addFormRows(ostream& html)
 
         ;
 
+}
+
+
+
+// Return true if there were no changes in the options
+// that affect graph layout changed, compared to another
+// SvgOptions object.
+bool LocalAssemblyGraph::SvgOptions::hasSameLayoutOptions(const SvgOptions& that) const
+{
+    return
+        (layoutMethod == that.layoutMethod) and
+        (minimumSegmentLength == that.minimumSegmentLength) and
+        (additionalSegmentLengthPerMarker == that.additionalSegmentLengthPerMarker) and
+        (minimumLinkLength == that.minimumLinkLength) and
+        (additionalLinkLengthPerMarker == that.additionalLinkLengthPerMarker)
+        ;
 }
 
 

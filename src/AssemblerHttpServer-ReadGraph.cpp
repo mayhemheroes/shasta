@@ -5,10 +5,12 @@
 #include "orderPairs.hpp"
 #include "platformDependent.hpp"
 #include "Reads.hpp"
+#include "timestamp.hpp"
 using namespace shasta;
 
 // Boost libraries.
 #include <boost/graph/iteration_macros.hpp>
+#include <boost/tokenizer.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -171,7 +173,7 @@ void Assembler::exploreUndirectedReadGraph(
         readGraphHeading =
             "<h3>Display a local subgraph of the <a href='docs/ComputationalMethods.html#ReadGraph'>read graph</a></h3>";
     }
-    html << readGraphHeading << 
+    html << readGraphHeading <<
          "<form>"
          "<div style='clear:both; display:table;'>"
          "<div style='float:left;margin:10px;'>"
@@ -394,9 +396,9 @@ void Assembler::exploreUndirectedReadGraph(
         }
 
         // Remove the files we created.
-        filesystem::remove(fastaFileName);
-        filesystem::remove(blastOutputFileName);
-        filesystem::remove(blastErrFileName);
+        std::filesystem::remove(fastaFileName);
+        std::filesystem::remove(blastOutputFileName);
+        std::filesystem::remove(blastErrFileName);
 
         // Now store the alignments as additional text in the vertices tooltips.
         BGL_FORALL_VERTICES(v, graph, LocalReadGraph) {
@@ -577,7 +579,7 @@ void Assembler::exploreUndirectedReadGraph(
         BGL_FORALL_VERTICES(v, graph, LocalReadGraph) {
             sortedVertices.push_back(make_pair(graph[v].orientedReadId, v));
         }
-        sort(sortedVertices.begin(), sortedVertices.end(),
+        std::ranges::sort(sortedVertices,
             OrderPairsByFirstOnly<OrientedReadId, vertex_descriptor>());
 
         // Write least square positions of the vertices.
@@ -609,7 +611,7 @@ void Assembler::exploreUndirectedReadGraph(
             const double residual = (x1 - x0) - graph[e].averageAlignmentOffset;
             sortedEdges.push_back(make_pair(abs(residual), e));
         }
-        sort(sortedEdges.begin(), sortedEdges.end(),
+        std::ranges::sort(sortedEdges,
             OrderPairsByFirstOnlyGreater<double, edge_descriptor>());
 
 

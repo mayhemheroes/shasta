@@ -2,7 +2,6 @@
 
 // Shasta.
 #include "HttpServer.hpp"
-#include "filesystem.hpp"
 #include "platformDependent.hpp"
 #include "SHASTA_ASSERT.hpp"
 #include "timestamp.hpp"
@@ -22,6 +21,7 @@ using namespace ip;
 
 // Standard library.
 #include "chrono.hpp"
+#include <filesystem>
 #include "fstream.hpp"
 #include "iostream.hpp"
 #include <regex>
@@ -510,7 +510,7 @@ size_t PostData::getContentLength() const
     if(it == headers.end()) {
         throw runtime_error("POST request without content length is not supported.");
     }
-    return lexical_cast<size_t>(it->second);
+    return std::stoul(it->second);
 
 }
 
@@ -661,7 +661,7 @@ bool HttpServer::isLocalConnectionSameUser(
     const string uuid = to_string(boost::uuids::random_generator()());
     const string fileName = tmpDirectory() + uuid + ".fa";
     if(::system(("lsof -i -n > " + fileName).c_str())) {
-        filesystem::remove(fileName);
+        std::filesystem::remove(fileName);
         return false;
     }
 
@@ -772,7 +772,7 @@ bool HttpServer::isLocalConnectionSameUser(
             clientProcessUserName = userName;
         }
     }
-    filesystem::remove(fileName);
+    std::filesystem::remove(fileName);
 
     return
         serverProcessUserName.size()>0 &&

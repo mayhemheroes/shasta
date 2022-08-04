@@ -3,6 +3,7 @@
 #include "CompressedAssemblyGraph.hpp"
 #include "platformDependent.hpp"
 #include "runCommandWithTimeout.hpp"
+#include "timestamp.hpp"
 using namespace shasta;
 
 // Boost libraries.
@@ -12,7 +13,11 @@ using namespace shasta;
 #include <boost/uuid/uuid_io.hpp>
 
 // Standard library.
+#include <filesystem>
+#include "fstream.hpp"
 #include <map>
+
+
 
 void Assembler::exploreCompressedAssemblyGraph(
     const vector<string>& request,
@@ -190,7 +195,7 @@ void Assembler::exploreCompressedAssemblyGraph(
             ". The failing Command was: <code>" << command << "</code>";
         return;
     }
-    filesystem::remove(dotFileName);
+    std::filesystem::remove(dotFileName);
 
 
     // Display the graph.
@@ -198,6 +203,6 @@ void Assembler::exploreCompressedAssemblyGraph(
     ifstream svgFile(svgFileName);
     html << svgFile.rdbuf();
     svgFile.close();
-    filesystem::remove(svgFileName);
+    std::filesystem::remove(svgFileName);
 
 }

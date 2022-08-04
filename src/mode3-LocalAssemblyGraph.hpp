@@ -84,7 +84,7 @@ public:
     public:
 
         double sizePixels = 600.;
-        string layoutMethod = "neato";
+        string layoutMethod;
 
 
 
@@ -109,7 +109,7 @@ public:
         uint64_t referenceSegmentId = 0;// Only used if segmentColoring is "byCommonReads"
         uint64_t hashSeed = 0;          // Only used if segmentCooring is "byClusterId"
         uint64_t pathStart = 0;         // Only used is segmentColoring is "path"
-        uint64_t pathDirection = 0;     // Only used is segmentColoring is "path" (0=forward, 1=backward)
+        string pathDirection = "forward";  // Only used is segmentColoring is "path"
 
         // Clusters to be colored, if coloring by cluster id.
         // If empty, all clusters are colored.
@@ -145,6 +145,11 @@ public:
 
         // Add rows to the html request form.
         void addFormRows(ostream& html);
+
+        // Return true if there were no changes in the options
+        // that affect graph layout changed, compared to another
+        // SvgOptions object.
+        bool hasSameLayoutOptions(const SvgOptions& that) const;
     };
     void writeHtml(ostream& html, const SvgOptions&) const;
     void writeSvg(
@@ -170,7 +175,7 @@ public:
 
     // Return the average link separation for the Link
     // described by an edge.
-    double linkSeparation(edge_descriptor) const;
+    int32_t linkSeparation(edge_descriptor) const;
 
     // Write the local assembly graph in gfa format.
     void writeGfa(const string& fileName) const;

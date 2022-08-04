@@ -2,11 +2,11 @@
 #define SHASTA_ASSEMBLER_HPP
 
 // Shasta.
+#include "Alignment.hpp"
 #include "AlignmentCandidates.hpp"
 #include "AssemblyGraph2Statistics.hpp"
 #include "HttpServer.hpp"
 #include "Kmer.hpp"
-#include "LocalAlignmentCandidateGraph.hpp"
 #include "Marker.hpp"
 #include "MarkerGraph.hpp"
 #include "MemoryMappedObject.hpp"
@@ -27,6 +27,7 @@ namespace shasta {
     class AssemblerInfo;
     class AssemblyGraph;
     class Alignment;
+    class AlignmentData;
     class AlignmentGraph;
     class AlignmentInfo;
     class AlignOptions;
@@ -72,6 +73,8 @@ namespace shasta {
     namespace mode3 {
         class AssemblyGraph;
     }
+
+    extern template class MultithreadedObject<Assembler>;
 }
 
 namespace spoa {
@@ -221,7 +224,7 @@ public:
     // Create a histogram of read lengths.
     void histogramReadLength(const string& fileName);
 
- 
+
     // Functions related to markers.
     // See the beginning of Marker.hpp for more information.
     void findMarkers(size_t threadCount);
@@ -938,7 +941,7 @@ private:
     // The order in compressedAlignments matches that in alignmentData.
     MemoryMapped::Vector<AlignmentData> alignmentData;
     MemoryMapped::VectorOfVectors<char, uint64_t> compressedAlignments;
-    
+
     void checkAlignmentDataAreOpen() const;
 public:
     void accessCompressedAlignments();
@@ -1794,7 +1797,7 @@ private:
         MarkerGraphEdgeId,
         uint32_t markerGraphEdgeLengthThresholdForConsensus,
         const std::unique_ptr<spoa::AlignmentEngine>& spoaAlignmentEngine,
-        const std::unique_ptr<spoa::Graph>& spoaAlignmentGraph,
+        spoa::Graph& spoaAlignmentGraph,
         vector<Base>& sequence,
         vector<uint32_t>& repeatCounts,
         uint8_t& overlappingBaseCount,
@@ -2207,7 +2210,7 @@ public:
     static void addScaleSvgButtons(ostream&, uint64_t sizePixels);
     class HttpServerData {
     public:
-        LocalAlignmentCandidateGraph referenceOverlapGraph;
+        shared_ptr<LocalAlignmentCandidateGraph> referenceOverlapGraph;
 
         using ServerFunction = void (Assembler::*) (
             const vector<string>& request,

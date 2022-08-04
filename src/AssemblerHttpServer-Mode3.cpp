@@ -1,3 +1,4 @@
+// Shasta.
 #include "Assembler.hpp"
 #include "mode3.hpp"
 #include "mode3-LocalAssemblyGraph.hpp"
@@ -5,8 +6,12 @@
 using namespace shasta;
 using namespace mode3;
 
+// Boost library.
 #include <boost/icl/discrete_interval.hpp>
 #include <boost/icl/right_open_interval.hpp>
+
+// Standard library.
+#include "fstream.hpp"
 
 
 void Assembler::exploreMode3AssemblyGraph(
@@ -80,17 +85,39 @@ void Assembler::exploreMode3AssemblyGraph(
 
     html << "<h1>Local assembly graph near segment " << startSegmentId << "</h1></p>";
 
-    // Create the local assembly graph.
-    mode3::LocalAssemblyGraph localAssemblyGraph(
-        markerGraph,
-        *assemblyGraph3Pointer,
-        startSegmentId, maxDistance);
-    localAssemblyGraph.computeLayout(options, timeout);
-    localAssemblyGraph.computeSegmentTangents();
+
+
+    // Create the local assembly graph, or reuse the last one, if possible.
+    static shared_ptr<mode3::LocalAssemblyGraph> lastLocalAssemblyGraphPointer;
+    static shared_ptr<mode3::LocalAssemblyGraph::SvgOptions> lastOptions;
+    static uint64_t lastStartSegmentId = invalid<uint64_t>;
+    static uint64_t lastMaxDistance = invalid<uint64_t>;
+    const bool canReuse =
+        lastLocalAssemblyGraphPointer and
+        (startSegmentId == lastStartSegmentId) and
+        (maxDistance == lastMaxDistance) and
+        options.hasSameLayoutOptions(*lastOptions);
+    if(canReuse) {
+        cout << "Reusing the previous mode3::LocalAssemblyGraph." << endl;
+    } else {
+        lastLocalAssemblyGraphPointer = make_shared<mode3::LocalAssemblyGraph>(
+            markerGraph,
+            *assemblyGraph3Pointer,
+            startSegmentId, maxDistance);
+        lastOptions = make_shared<mode3::LocalAssemblyGraph::SvgOptions>(options);
+        lastStartSegmentId = startSegmentId;
+        lastMaxDistance = maxDistance;
+        lastLocalAssemblyGraphPointer->computeLayout(options, timeout);
+        lastLocalAssemblyGraphPointer->computeSegmentTangents();
+    }
+    mode3::LocalAssemblyGraph& localAssemblyGraph = *lastLocalAssemblyGraphPointer;
+
     html << "<p>The local assembly graph has " <<
         num_vertices(localAssemblyGraph) << " segments and " <<
         num_edges(localAssemblyGraph) << " links."
         "<p>";
+
+
 
     // Display the local assembly graph.
     localAssemblyGraph.writeHtml(html, options);
@@ -277,10 +304,6 @@ void Assembler::exploreMode3AssemblyGraphLink(
     const auto path1 = assemblyGraph3.paths[segmentId1];
     const uint64_t pathLength0 = path0.size();
     const uint64_t pathLength1 = path1.size();
-    const MarkerGraph::VertexId vertexId0 = markerGraph.edges[path0.back()].target;
-    const MarkerGraph::VertexId vertexId1 = markerGraph.edges[path1.front()].source;
-
-    const double linkSeparation = mode3::AssemblyGraph::linkSeparation(transitions, pathLength0);
 
     html <<
         "<h1>Assembly graph link " << linkId << "</h1>"
@@ -288,12 +311,12 @@ void Assembler::exploreMode3AssemblyGraphLink(
         "<tr><th>Segment<th>Id<th>Path<br>length"
         "<tr><th class = left>Source segment<td class=centered>" << segmentId0 << "<td class=centered>" << pathLength0 <<
         "<tr><th class = left>Target segment<td class=centered>" << segmentId1 << "<td class=centered>" << pathLength1 <<
-        "</table>";
+         "</table>";
 
-    if(vertexId0 == vertexId1) {
-        html << "<p>The paths of these segments are consecutive.";
+    if(link.segmentsAreAdjacent) {
+        html << "<p>The paths of these segments are adjacent.";
     } else {
-        html << "<p>The paths of these segments are not consecutive.";
+        html << "<p>The paths of these segments are not adjacent.";
     }
 
 
@@ -304,7 +327,7 @@ void Assembler::exploreMode3AssemblyGraphLink(
         "<tr><th class = left tooltip='Number of supporting transitions'>Coverage<td class=centered>" <<
         transitions.size() <<
         "<tr><th class = left>Average link separation<td class=centered>" <<
-        linkSeparation <<
+        link.separation <<
         "</table>";
     html.precision(oldPrecision);
     html.flags(oldFlags);

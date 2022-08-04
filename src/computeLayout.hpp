@@ -34,7 +34,6 @@ v x y
 
 
 // Shasta.
-#include "filesystem.hpp"
 #include "platformDependent.hpp"
 #include "runCommandWithTimeout.hpp"
 #include "SHASTA_ASSERT.hpp"
@@ -43,16 +42,17 @@ v x y
 #include <boost/algorithm/string.hpp>
 #include <boost/graph/adjacency_list.hpp>
 #include <boost/graph/iteration_macros.hpp>
-#include <boost/lexical_cast.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
 // Standard library.
 #include "array.hpp"
+#include <filesystem>
 #include "fstream.hpp"
 #include <map>
 #include "utility.hpp"
+#include "vector.hpp"
 
 
 namespace shasta {
@@ -149,7 +149,7 @@ template<class Graph> shasta::ComputeLayoutReturnCode shasta::computeLayoutGraph
     bool signalOccurred = false;
     int returnCode = 0;
     runCommandWithTimeout(command, timeout, timeoutTriggered, signalOccurred, returnCode);
-    filesystem::remove(dotFileName);
+    std::filesystem::remove(dotFileName);
     if(signalOccurred) {
         return ComputeLayoutReturnCode::Signal;
     }
@@ -187,7 +187,7 @@ template<class Graph> shasta::ComputeLayoutReturnCode shasta::computeLayoutGraph
         // Get the vertex id.
         const string& vertexName = tokens[1];
         SHASTA_ASSERT(not vertexName.empty());
-        const uint64_t vertexId = boost::lexical_cast<uint64_t>(vertexName);
+        const uint64_t vertexId = std::stoul(vertexName);
 
         // Get the corresponding vertex descriptor.
         SHASTA_ASSERT(vertexId < vertexVector.size());
@@ -195,12 +195,12 @@ template<class Graph> shasta::ComputeLayoutReturnCode shasta::computeLayoutGraph
 
         // Store it in the layout.
         array<double, 2> x;
-        x[0] = boost::lexical_cast<double>(tokens[2]);
-        x[1] = boost::lexical_cast<double>(tokens[3]);
+        x[0] = std::stod(tokens[2]);
+        x[1] = std::stod(tokens[3]);
         positionMap.insert(make_pair(v, x));
     }
     plainFile.close();
-    filesystem::remove(plainFileName);
+    std::filesystem::remove(plainFileName);
 
     return ComputeLayoutReturnCode::Success;
 
@@ -265,7 +265,7 @@ template<class Graph> shasta::ComputeLayoutReturnCode shasta::computeLayoutCusto
     if(returnCode!=0 ) {
         return ComputeLayoutReturnCode::Error;
     }
-    filesystem::remove(inputFileName);
+    std::filesystem::remove(inputFileName);
 
 
 
@@ -282,7 +282,7 @@ template<class Graph> shasta::ComputeLayoutReturnCode shasta::computeLayoutCusto
 
     }
     outputFile.clear();
-    filesystem::remove(outputFileName);
+    std::filesystem::remove(outputFileName);
 
 
 

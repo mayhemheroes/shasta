@@ -2,12 +2,14 @@
 #include "PngImage.hpp"
 
 #include "Assembler.hpp"
+#include "Alignment.hpp"
 using namespace shasta;
-
 
 // Seqan.
 #include <seqan/align.h>
 
+// Standard library.
+#include "fstream.hpp"
 #include <numeric>
 
 
@@ -100,7 +102,7 @@ void Assembler::alignOrientedReads3(
         alignment.clear();
         alignmentInfo.create(
             alignment, uint32_t(allMarkers[0].size()), uint32_t(allMarkers[1].size()));
-        return; 
+        return;
     }
 
     // Use SeqAn to compute an alignment of the downsampled markers, free at both ends.

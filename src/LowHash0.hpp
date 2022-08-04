@@ -9,11 +9,14 @@
 #include "Reads.hpp"
 
 // Standard library.
+#include "fstream.hpp"
 #include "tuple.hpp"
 
 namespace shasta {
     class LowHash0;
     class Reads;
+
+    extern template class MultithreadedObject<LowHash0>;
 }
 
 

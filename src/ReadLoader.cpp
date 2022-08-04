@@ -1,6 +1,7 @@
 // Shasta.
 #include "ReadLoader.hpp"
 #include "computeRunLengthRepresentation.hpp"
+#include "filesystem.hpp"
 #include "performanceLog.hpp"
 #include "splitRange.hpp"
 using namespace shasta;
@@ -11,6 +12,8 @@ using namespace shasta;
 #include <filesystem>
 #include "tuple.hpp"
 
+#include "MultithreadedObject.tpp"
+template class MultithreadedObject<ReadLoader>;
 
 // Load reads from a fastq or fasta file.
 ReadLoader::ReadLoader(
@@ -22,7 +25,7 @@ ReadLoader::ReadLoader(
     const string& dataNamePrefix,
     size_t pageSize,
     Reads& reads):
-    
+
     MultithreadedObject(*this),
     fileName(fileName),
     representation(representation),
