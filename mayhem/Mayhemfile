@@ -1,7 +1,7 @@
 project: shasta
 target: shasta
-duration: 300
 
 cmds:
   - cmd: /shasta --config Nanopore-May2022 --input @@ --assemblyDirectory in
     filepath: /test.fa
+image: ghcr.io/rnshah9/playground:shasta
