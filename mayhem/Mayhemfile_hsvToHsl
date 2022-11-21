@@ -1,0 +1,6 @@
+project: shasta
+target: hsvtohsl
+
+cmds:
+  - cmd: /fuzz_hsvToHsl
+    libfuzzer: true
