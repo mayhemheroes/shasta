@@ -1,6 +1,7 @@
 // Shasta.
 #include "mode3-PathGraph.hpp"
 #include "findLinearChains.hpp"
+#include "MurmurHash2.hpp"
 #include "orderPairs.hpp"
 #include "transitiveReduction.hpp"
 using namespace shasta;
@@ -99,7 +100,7 @@ void PathGraph::createVertices() {
 
 
     // Create a vertex for each segment in the AssemblyGraph.
-    for(uint64_t segmentId=0; segmentId<assemblyGraph.paths.size(); segmentId++) {
+    for(uint64_t segmentId=0; segmentId<assemblyGraph.markerGraphPaths.size(); segmentId++) {
 
         // Create the vertex.
         const vertex_descriptor v = add_vertex(pathGraph);

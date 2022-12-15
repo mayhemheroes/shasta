@@ -1,7 +1,10 @@
 // Shasta.
 #include "Assembler.hpp"
+#include "assembleMarkerGraphPath.hpp"
 #include "mode3.hpp"
+#include "mode3-AssemblyPath.hpp"
 #include "mode3-LocalAssemblyGraph.hpp"
+#include "mode3-SegmentPairInformation.hpp"
 #include "PngImage.hpp"
 using namespace shasta;
 using namespace mode3;
@@ -71,14 +74,14 @@ void Assembler::exploreMode3AssemblyGraph(
         return;
     }
 
-    if(startSegmentId >= assemblyGraph3Pointer->paths.size()) {
+    if(startSegmentId >= assemblyGraph3Pointer->markerGraphPaths.size()) {
         html << "<p>Invalid start segment id. Maximum valid value is " <<
-            assemblyGraph3Pointer->paths.size() - 1;
+            assemblyGraph3Pointer->markerGraphPaths.size() - 1;
         return;
     }
-    if(options.referenceSegmentId >= assemblyGraph3Pointer->paths.size()) {
+    if(options.referenceSegmentId >= assemblyGraph3Pointer->markerGraphPaths.size()) {
         html << "<p>Invalid reference segment id. Maximum valid value is " <<
-            assemblyGraph3Pointer->paths.size() - 1;
+            assemblyGraph3Pointer->markerGraphPaths.size() - 1;
         return;
     }
 
@@ -137,9 +140,27 @@ void Assembler::exploreMode3AssemblyGraphSegment(
     SHASTA_ASSERT(assemblyGraph3Pointer);
     const mode3::AssemblyGraph& assemblyGraph3 = *assemblyGraph3Pointer;
 
-    // Get the segment id from the request.
+
+
+    // Get request parameters.
     uint64_t segmentId;
     const bool segmentIdIsPresent = getParameterValue(request, "segmentId", segmentId);
+
+    string showOrientedReadsString;
+    const bool showOrientedReads = HttpServer::getParameterValue(request,
+        "showOrientedReads", showOrientedReadsString);
+
+    string showMarkerGraphPathString;
+    const bool showMarkerGraphPath = HttpServer::getParameterValue(request,
+        "showMarkerGraphPath", showMarkerGraphPathString);
+
+    string showSequenceString;
+    const bool showSequence = HttpServer::getParameterValue(request,
+        "showSequence", showSequenceString);
+
+    string showSequenceDetailsString;
+    const bool showSequenceDetails = HttpServer::getParameterValue(request,
+        "showSequenceDetails", showSequenceDetailsString);
 
 
 
@@ -155,6 +176,30 @@ void Assembler::exploreMode3AssemblyGraphSegment(
         " value='" << (segmentIdIsPresent ? to_string(segmentId) : "") <<
         "'>"
 
+        "<tr>"
+        "<td>Show oriented reads"
+        "<td class=centered> <input type=checkbox name=showOrientedReads" <<
+        (showOrientedReads ? " checked=checked" : "") <<
+        ">"
+
+        "<tr>"
+        "<td>Show marker graph path"
+        "<td class=centered> <input type=checkbox name=showMarkerGraphPath" <<
+        (showMarkerGraphPath ? " checked=checked" : "") <<
+        ">"
+
+        "<tr>"
+        "<td>Show sequence"
+        "<td class=centered> <input type=checkbox name=showSequence" <<
+        (showSequence ? " checked=checked" : "") <<
+        ">"
+
+        "<tr>"
+        "<td>Show sequence assembly details"
+        "<td class=centered> <input type=checkbox name=showSequenceDetails" <<
+        (showSequenceDetails ? " checked=checked" : "") <<
+        ">"
+
         "</table>"
         "<br><input type=submit value='Display'>"
         "</form>";
@@ -165,14 +210,14 @@ void Assembler::exploreMode3AssemblyGraphSegment(
     }
 
     // Check that we have a valid segmentId.
-    if(segmentId >= assemblyGraph3.paths.size()) {
+    if(segmentId >= assemblyGraph3.markerGraphPaths.size()) {
         html << "Invalid segment id. Maximum valid value is " <<
-            assemblyGraph3.paths.size() - 1 << ".";
+            assemblyGraph3.markerGraphPaths.size() - 1 << ".";
         return;
     }
 
     // Access the marker graph path for this segment.
-    const auto path = assemblyGraph3.paths[segmentId];
+    const auto path = assemblyGraph3.markerGraphPaths[segmentId];
 
     // Get information about the oriented reads of this segment.
     mode3::AssemblyGraph::SegmentOrientedReadInformation orientedReads;
@@ -206,57 +251,83 @@ void Assembler::exploreMode3AssemblyGraphSegment(
 
 
     // Write the oriented reads in a table.
-    html <<
-        "<h2>Oriented reads on this segment</h2>"
-        "<table>"
-        "<tr>"
-        "<th>Oriented<br>read"
-        "<th>Average<br>offset";
-    for(const auto& info: orientedReads.infos) {
-        html<<
+    if(showOrientedReads) {
+        html <<
+            "<h2>Oriented reads on this segment</h2>"
+            "<table>"
             "<tr>"
-            "<td class=centered>" << info.orientedReadId <<
-            "<td class=centered>" << info.averageOffset;
+            "<th>Oriented<br>read"
+            "<th>Average<br>offset";
+        for(const auto& info: orientedReads.infos) {
+            html<<
+                "<tr>"
+                "<td class=centered>" << info.orientedReadId <<
+                "<td class=centered>" << info.averageOffset;
+        }
+        html << "</table>";
     }
-    html << "</table>";
 
 
 
-    // Write the path in a table.
-    html <<
-        "<h2>Marker graph path for this segment</h2>"
-        "<table>"
-        "<tr>"
-        "<th>Position"
-        "<th>Edge"
-        "<th>Coverage"
-        "<th>Source<br>vertex"
-        "<th>Target<br>vertex";
+    // Write the marker graph path.
+    if(showMarkerGraphPath) {
+        html <<
+            "<h2>Marker graph path for this segment</h2>"
+            "<table>"
+            "<tr>"
+            "<th>Position"
+            "<th>Edge"
+            "<th>Coverage"
+            "<th>Source<br>vertex"
+            "<th>Target<br>vertex";
 
-    for(uint64_t position=0; position<path.size(); position++) {
-        const MarkerGraphEdgeId& edgeId = path[position];
-        const MarkerGraph::Edge& edge = markerGraph.edges[edgeId];
-        const MarkerGraph::VertexId vertexId0 = edge.source;
-        const MarkerGraph::VertexId vertexId1 = edge.target;
+        for(uint64_t position=0; position<path.size(); position++) {
+            const MarkerGraphEdgeId& edgeId = path[position];
+            const MarkerGraph::Edge& edge = markerGraph.edges[edgeId];
+            const MarkerGraph::VertexId vertexId0 = edge.source;
+            const MarkerGraph::VertexId vertexId1 = edge.target;
 
-        html << "<tr>"
-            "<td class=centered>" << position <<
-            "<td class=centered>" <<
-            "<a href='exploreMarkerGraphEdge?edgeId=" << edgeId <<
-            "'>" << edgeId << "</a>"
-            "<td class=centered>" << markerGraph.edgeMarkerIntervals.size(edgeId) <<
-            "<td class=centered>" <<
-            "<a href='exploreMarkerGraphVertex?vertexId=" << vertexId0 <<
-            "'>" << vertexId0 << "</a>"
-            "<td class=centered>" <<
-            "<a href='exploreMarkerGraphVertex?vertexId=" << vertexId1 <<
-            "'>" << vertexId1 << "</a>"
-            "\n";
+            html << "<tr>"
+                "<td class=centered>" << position <<
+                "<td class=centered>" <<
+                "<a href='exploreMarkerGraphEdge?edgeId=" << edgeId <<
+                "'>" << edgeId << "</a>"
+                "<td class=centered>" << markerGraph.edgeMarkerIntervals.size(edgeId) <<
+                "<td class=centered>" <<
+                "<a href='exploreMarkerGraphVertex?vertexId=" << vertexId0 <<
+                "'>" << vertexId0 << "</a>"
+                "<td class=centered>" <<
+                "<a href='exploreMarkerGraphVertex?vertexId=" << vertexId1 <<
+                "'>" << vertexId1 << "</a>"
+                "\n";
 
 
 
+        }
+        html << "</table>";
     }
-    html << "</table>";
+
+
+
+    // Assembled sequence, optionally with details.
+    if(showSequence or showSequenceDetails) {
+
+        // Assemble the sequence for this segment.
+        AssembledSegment assembledSegment;
+        assembleMarkerGraphPath(
+            assemblyGraph3.readRepresentation,
+            assemblyGraph3.k,
+            assemblyGraph3.markers,
+            assemblyGraph3.markerGraph,
+            assemblyGraph3.markerGraphPaths[segmentId],
+            false,
+            assembledSegment);
+
+        // Write the sequence.
+        assembledSegment.writeHtml(html, showSequence, showSequenceDetails,
+            0, uint32_t(assembledSegment.rawSequence.size()));
+    }
+
 
 }
 
@@ -300,8 +371,8 @@ void Assembler::exploreMode3AssemblyGraphLink(
     const auto transitions = assemblyGraph3.transitions[linkId];
     const uint64_t segmentId0 = link.segmentId0;
     const uint64_t segmentId1 = link.segmentId1;
-    const auto path0 = assemblyGraph3.paths[segmentId0];
-    const auto path1 = assemblyGraph3.paths[segmentId1];
+    const auto path0 = assemblyGraph3.markerGraphPaths[segmentId0];
+    const auto path1 = assemblyGraph3.markerGraphPaths[segmentId1];
     const uint64_t pathLength0 = path0.size();
     const uint64_t pathLength1 = path1.size();
 
@@ -346,7 +417,7 @@ void Assembler::exploreMode3AssemblyGraphLink(
 
     for(const auto& p: transitions) {
         const OrientedReadId orientedReadId = p.first;
-        const mode3::AssemblyGraph::Transition& transition = p.second;
+        const Transition& transition = p.second;
         const auto& pseudoPathEntry0 = transition[0];
         const auto& pseudoPathEntry1 = transition[1];
 
@@ -427,14 +498,14 @@ void Assembler::exploreMode3AssemblyGraphSegmentPair(
     }
 
     // Check that we have valid segmentId's.
-    if(segmentId0 >= assemblyGraph3.paths.size()) {
+    if(segmentId0 >= assemblyGraph3.markerGraphPaths.size()) {
         html << "Invalid segment id. Maximum valid value is " <<
-            assemblyGraph3.paths.size() - 1 << ".";
+            assemblyGraph3.markerGraphPaths.size() - 1 << ".";
         return;
     }
-    if(segmentId1 >= assemblyGraph3.paths.size()) {
+    if(segmentId1 >= assemblyGraph3.markerGraphPaths.size()) {
         html << "Invalid segment id. Maximum valid value is " <<
-            assemblyGraph3.paths.size() - 1 << ".";
+            assemblyGraph3.markerGraphPaths.size() - 1 << ".";
         return;
     }
 
@@ -444,12 +515,12 @@ void Assembler::exploreMode3AssemblyGraphSegmentPair(
     mode3::AssemblyGraph::SegmentOrientedReadInformation orientedReads1;
     assemblyGraph3.getOrientedReadsOnSegment(segmentId0, orientedReads0);
     assemblyGraph3.getOrientedReadsOnSegment(segmentId1, orientedReads1);
-    const uint64_t length0 = assemblyGraph3.paths.size(segmentId0);
-    const uint64_t length1 = assemblyGraph3.paths.size(segmentId1);
+    const uint64_t length0 = assemblyGraph3.markerGraphPaths.size(segmentId0);
+    const uint64_t length1 = assemblyGraph3.markerGraphPaths.size(segmentId1);
 
     // Estimate the offset between the segments and count missing
     // oriented reads.
-    mode3::AssemblyGraph::SegmentPairInformation segmentPairInformation;
+    SegmentPairInformation segmentPairInformation;
     assemblyGraph3.analyzeSegmentPair(
             segmentId0, segmentId1,
             orientedReads0, orientedReads1,
@@ -503,6 +574,11 @@ void Assembler::exploreMode3AssemblyGraphSegmentPair(
             "<td class=centered>" << segmentPairInformation.jaccard() <<
             "<td class=centered>" << segmentPairInformation.jaccard() <<
 
+            "<tr title='Jaccard similarity without special treatment of short reads'>"
+            "<th class=left>Raw Jaccard"
+            "<td class=centered>" << segmentPairInformation.rawJaccard() <<
+            "<td class=centered>" << segmentPairInformation.rawJaccard() <<
+
             "<tr title='Fraction of oriented reads in this segment that are "
             "unexpectedly missing in the other segment'>"
             "<th class=left>Unexplained fraction"
@@ -513,6 +589,10 @@ void Assembler::exploreMode3AssemblyGraphSegmentPair(
     }
 
      html <<  "</table>";
+     if(segmentPairInformation.commonCount > 0) {
+         html << "<p>Estimated offset " << segmentPairInformation.offset;
+         html << "<br>Estimated gap " << segmentPairInformation.offset - int64_t(length0);
+     }
 
 
 
@@ -724,4 +804,186 @@ void Assembler::exploreMode3MetaAlignment(
     html << png.rdbuf();
     html << "\"/>";
 
+}
+
+
+
+void Assembler::exploreMode3AssemblyPath(
+    const vector<string>& request,
+    ostream& html)
+{
+    // Get the parametersof the request.
+
+    // The segment that the path will start from.
+    string pathStartString;
+    HttpServer::getParameterValue(request, "pathStart", pathStartString);
+
+    // The path direction can be forward, backward, or bidirectional.
+    string pathDirection = "bidirectional";
+    HttpServer::getParameterValue(request, "pathDirection", pathDirection);
+
+
+
+    // Write the form.
+    html <<
+        "<h2>Assembly path computation</h2>"
+        "<form>"
+
+        "Start the path at segment &nbsp;<input type=text name=pathStart required size=8 style='text-align:center'"
+                " value='" << pathStartString << "'>"
+
+        "<br><input type=radio name=pathDirection value=forward" <<
+        (pathDirection=="forward" ? " checked=checked" : "") << "> Forward"
+        "<br><input type=radio name=pathDirection value=backward" <<
+        (pathDirection=="backward" ? " checked=checked" : "") << "> Backward"
+        "<br><input type=radio name=pathDirection value=bidirectional" <<
+        (pathDirection=="bidirectional" ? " checked=checked" : "") << "> Both directions" <<
+
+        "<p><input type=submit value='Compute the path and assemble its sequence'>"
+        "</form>";
+
+    // If the path start was not specified, stop here.
+    if(pathStartString.empty()) {
+        return;
+    }
+
+    // Get the path start segment.
+    uint64_t pathStart;
+    try {
+        pathStart = boost::lexical_cast<uint64_t>(pathStartString);
+    } catch(std::exception&) {
+        throw runtime_error("Invalid path start segment id.");
+    }
+
+    // Check that it is a valid segment id.
+    const mode3::AssemblyGraph& assemblyGraph = *assemblyGraph3Pointer;
+    if(pathStart >= assemblyGraph.markerGraphPaths.size()) {
+        throw runtime_error("Invalid path start segment id. The assembly graph has " +
+            to_string(assemblyGraph.markerGraphPaths.size()) + " segments.");
+    }
+
+    // Write a header.
+    html << "<h1>Assembly path</h1>";
+
+
+
+    // Compute the assembly path.
+    AssemblyPath path;
+    if(pathDirection == "forward" or pathDirection == "backward") {
+
+        // Forward or backward.
+        assemblyGraph.createAssemblyPath(pathStart,
+            (pathDirection == "forward") ? 0 : 1, path);
+        if(pathDirection == "backward") {
+            reverse(path.segments.begin(), path.segments.end());
+        }
+
+    } else {
+
+        // Bidirectional.
+        AssemblyPath forwardPath;
+        AssemblyPath backwardPath;
+        assemblyGraph.createAssemblyPath(pathStart, 0, forwardPath);
+        assemblyGraph.createAssemblyPath(pathStart, 1, backwardPath);
+
+        // Stitch them together, making sure not to repeat the starting segment.
+        path.segments.clear();
+        copy(backwardPath.segments.rbegin(), backwardPath.segments.rend(), back_inserter(path.segments));
+        copy(forwardPath.segments.begin() + 1, forwardPath.segments.end(), back_inserter(path.segments));
+
+    }
+
+    html << "<p>This assembly path was created starting at segment " << pathStart <<
+        " and moving ";
+    if(pathDirection == "forward") {
+        html << "forward.";
+    } else if(pathDirection == "backward") {
+        html << "backward.";
+    } else if(pathDirection == "bidirectional") {
+        html << "in both directions.";
+    }
+
+    // Assemble sequence for this path.
+    path.assemble(assemblyGraph);
+
+    // Write path details to html.
+    path.writeHtml(html, assemblyGraph);
+
+
+}
+
+
+
+void Assembler::exploreMode3LinkAssembly(
+    const vector<string>& request,
+    ostream& html)
+{
+    // Access the AssemblyGraph.
+    using mode3::AssemblyGraph; // Hide shasta::AssemblyGraph;
+    SHASTA_ASSERT(assemblyGraph3Pointer);
+    const AssemblyGraph& assemblyGraph = *assemblyGraph3Pointer;
+
+    // Get the parameters of the request.
+    uint64_t linkId = invalid<uint64_t>;
+    getParameterValue(request, "linkId", linkId);
+    SHASTA_ASSERT(linkId < assemblyGraph.links.size());
+    uint64_t previousPrimarySegmentId = invalid<uint64_t>;
+    getParameterValue(request, "previousPrimarySegmentId", previousPrimarySegmentId);
+    SHASTA_ASSERT(previousPrimarySegmentId < assemblyGraph.markerGraphPaths.size());
+    uint64_t nextPrimarySegmentId = invalid<uint64_t>;
+    getParameterValue(request, "nextPrimarySegmentId", nextPrimarySegmentId);
+    SHASTA_ASSERT(nextPrimarySegmentId < assemblyGraph.markerGraphPaths.size());
+
+    // Access the link.
+    if(linkId >= assemblyGraph.links.size()) {
+        html << "Invalid link id. There are " << assemblyGraph.links.size() <<
+            " links in the assembly graph.";
+        return;
+    }
+    const AssemblyGraph::Link& link = assemblyGraph.links[linkId];
+
+    // If this is a trivial link, there is nothing to show.
+    if(link.segmentsAreAdjacent) {
+        html << "This is a trivial link. No assembly is required.";
+        return;
+    }
+
+
+
+    html << "<h1>Details of link assembly</h1>";
+
+    // Create the segments and assemble them.
+    AssemblyPathSegment segment0(link.segmentId0, false);
+    AssemblyPathSegment segment1(link.segmentId1, false);
+    assembleMarkerGraphPath(
+        assemblyGraph.readRepresentation,
+        assemblyGraph.k,
+        assemblyGraph.markers,
+        assemblyGraph.markerGraph,
+        assemblyGraph.markerGraphPaths[segment0.id],
+        false,
+        segment0.assembledSegment);
+    assembleMarkerGraphPath(
+        assemblyGraph.readRepresentation,
+        assemblyGraph.k,
+        assemblyGraph.markers,
+        assemblyGraph.markerGraph,
+        assemblyGraph.markerGraphPaths[segment1.id],
+        false,
+        segment1.assembledSegment);
+
+    // Create the AssemblyPathLink.
+    AssemblyPathLink assemblyPathLink;
+    assemblyPathLink.id = linkId;
+    assemblyPathLink.isTrivial = false;
+    assemblyPathLink.previousPrimarySegmentId = previousPrimarySegmentId;
+    assemblyPathLink.nextPrimarySegmentId = nextPrimarySegmentId;
+
+    // Do the assembly.
+    AssemblyPath::assembleNonTrivialLink(
+        assemblyGraph,
+        segment0,
+        segment1,
+        assemblyPathLink,
+        html);
 }

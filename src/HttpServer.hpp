@@ -8,8 +8,6 @@
 
 #include "span.hpp"
 
-#include <boost/asio/ip/tcp.hpp>
-
 #include "iosfwd.hpp"
 #include <map>
 #include <set>
@@ -110,8 +108,12 @@ public:
     {
         for(size_t i = 0; i < request.size() - 1; i++) {
             if(request[i] == name) {
+                const string& next = request[i + 1];
+                if(next.empty()) {
+                    return false;
+                }
                 try {
-                    std::istringstream s(request[i + 1]);
+                    std::istringstream s(next);
                     s >> value;
                 } catch (...) {
                     return false;
@@ -160,18 +162,27 @@ protected:
 
 
 private:
-    void processRequest(boost::asio::ip::tcp::iostream&);
+    // Argument is boost::asio::ip::tcp::iostream&,
+    // but make it templated to reduce include file dependencies.
+    template<class T> void processRequest(T&);
+    // template<class T> void processRequest(boost::asio::ip::tcp::iostream&);
 
     void processPost(
         const vector<string>& request,
         std::iostream&);
 
-    void setRequestTimeout(int, boost::asio::ip::tcp::iostream&);
+    // Argument is boost::asio::ip::tcp::iostream&,
+    // but make it templated to reduce include file dependencies.
+    template<class T> void setRequestTimeout(int, T&);
+    // void setRequestTimeout(int, boost::asio::ip::tcp::iostream&);
 
     // Return true if the connection is a local connection
     // originating from a process owned by the same
     // user running the server.
-    bool isLocalConnectionSameUser(boost::asio::ip::tcp::iostream&, uint16_t port) const;
+    // Argument is boost::asio::ip::tcp::iostream&,
+    // but make it templated to reduce include file dependencies.
+    template<class T> bool isLocalConnectionSameUser(T&, uint16_t port) const;
+    // bool isLocalConnectionSameUser(boost::asio::ip::tcp::iostream&, uint16_t port) const;
 };
 
 

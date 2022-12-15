@@ -1,10 +1,15 @@
 
 // Shasta
 #include "mode3.hpp"
+#include "deduplicate.hpp"
 #include "findMarkerId.hpp"
+#include "html.hpp"
 #include "MarkerGraph.hpp"
+#include "mode3-AssemblyPath.hpp"
 #include "orderPairs.hpp"
+#include "Reads.hpp"
 #include "ReadFlags.hpp"
+#include "mode3-SegmentPairInformation.hpp"
 #include "SubsetGraph.hpp"
 using namespace shasta;
 using namespace mode3;
@@ -34,7 +39,7 @@ void AssemblyGraph::createSegmentPaths()
 {
     const bool debug = false;
 
-    createNew(paths, "Mode3-Paths");
+    createNew(markerGraphPaths, "Mode3-MarkerGraphPaths");
     const MarkerGraph::EdgeId edgeCount = markerGraph.edges.size();
     vector<bool> wasFound(edgeCount, false);
 
@@ -125,9 +130,9 @@ void AssemblyGraph::createSegmentPaths()
         }
 
         // Store this path as a new segment.
-        paths.appendVector();
+        markerGraphPaths.appendVector();
         for(const MarkerGraphEdgeId edgeId: path) {
-            paths.append(edgeId);
+            markerGraphPaths.append(edgeId);
         }
     }
 
@@ -140,8 +145,8 @@ void AssemblyGraph::createSegmentPaths()
     // Debug output: write the paths.
     if(debug) {
         ofstream csv("Paths.csv");
-        for(uint64_t segmentId=0; segmentId<paths.size(); segmentId++) {
-            const auto path = paths[segmentId];
+        for(uint64_t segmentId=0; segmentId<markerGraphPaths.size(); segmentId++) {
+            const auto path = markerGraphPaths[segmentId];
             for(const MarkerGraphEdgeId edgeId: path) {
                 csv << segmentId << ",";
                 csv << edgeId << "\n";
@@ -160,14 +165,14 @@ void AssemblyGraph::computeSegmentCoverage()
 {
     // Initialize segmentCoverage.
     createNew(segmentCoverage, "Mode3-SegmentCoverage");
-    const uint64_t segmentCount = paths.size();
+    const uint64_t segmentCount = markerGraphPaths.size();
     segmentCoverage.resize(segmentCount);
 
     // Loop over all segments.
     for(uint64_t segmentId=0; segmentId<segmentCount; segmentId++) {
 
         // Access the marker graph path for this segment.
-        const span<MarkerGraphEdgeId> path = paths[segmentId];
+        const span<MarkerGraphEdgeId> path = markerGraphPaths[segmentId];
 
 
         // Loop over this path.
@@ -216,7 +221,7 @@ void AssemblyGraph::computeMarkerGraphEdgeTable(size_t threadCount)
 
     // Fill in the marker graph edge table.
     const uint64_t batchSize = 100;
-    setupLoadBalancing(paths.size(), batchSize);
+    setupLoadBalancing(markerGraphPaths.size(), batchSize);
     runThreads(&AssemblyGraph::computeMarkerGraphEdgeTableThreadFunction, threadCount);
 }
 
@@ -231,7 +236,7 @@ void AssemblyGraph::computeMarkerGraphEdgeTableThreadFunction(size_t threadId)
 
         // Loop over all vertices assigned to this batch.
         for(uint64_t segmentId=begin; segmentId!=end; ++segmentId) {
-            const span<MarkerGraphEdgeId> path = paths[segmentId];
+            const span<MarkerGraphEdgeId> path = markerGraphPaths[segmentId];
 
             // Loop over the path of this segment.
             for(uint64_t position=0; position<path.size(); position++) {
@@ -473,7 +478,7 @@ void AssemblyGraph::computeAssemblyGraphJourneyInfos()
 {
     const bool debug = true;
 
-    const uint64_t segmentCount = paths.size();
+    const uint64_t segmentCount = markerGraphPaths.size();
     const uint64_t readCount = assemblyGraphJourneys.size()/2;
 
     createNew(assemblyGraphJourneyInfos, "Mode3-AssemblyGraphJourneyInfos");
@@ -530,6 +535,23 @@ void AssemblyGraph::computeAssemblyGraphJourneyInfos()
 
 
 
+// Find out if a segment contains a given OrientedReadId.
+// This returns true if assemblyGraphJourneyInfos[segmentId]
+// contains an entry with the given OrientedReadId.
+bool AssemblyGraph::segmentContainsOrientedRead(
+    uint64_t segmentId,
+    OrientedReadId orientedReadId) const
+{
+    for(const auto& p: assemblyGraphJourneyInfos[segmentId]) {
+        if(p.first == orientedReadId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+
 void AssemblyGraph::findTransitions(std::map<SegmentPair, Transitions>& transitionMap)
 {
     transitionMap.clear();
@@ -581,8 +603,8 @@ void AssemblyGraph::createLinks(
         // Check if these two segments are adjacent in the marker graph.
         const uint64_t segmentId0 = link.segmentId0;
         const uint64_t segmentId1 = link.segmentId1;
-        const auto path0 = paths[segmentId0];
-        const auto path1 = paths[segmentId1];
+        const auto path0 = markerGraphPaths[segmentId0];
+        const auto path1 = markerGraphPaths[segmentId1];
         const MarkerGraph::Edge lastEdge0 = markerGraph.edges[path0.back()];
         const MarkerGraph::Edge firstEdge1 = markerGraph.edges[path1.front()];
         if(lastEdge0.target == firstEdge1.source) {
@@ -599,6 +621,22 @@ void AssemblyGraph::createLinks(
             link.separation = int32_t(std::round(separation));
         }
     }
+
+
+
+    ofstream csv("Links.csv");
+    csv << "LinkId,SegmentId0,SegmentId1,Coverage,Adjacent,Separation\n";
+    for(uint64_t linkId=0; linkId<links.size(); linkId++) {
+        Link& link = links[linkId];
+
+        csv << linkId << ",";
+        csv << link.segmentId0 << ",";
+        csv << link.segmentId1 << ",";
+        csv << transitions[linkId].size() << ",";
+        csv << (link.segmentsAreAdjacent ? "Yes" : "No") << ",";
+        csv << link.separation << "\n";
+    }
+
 }
 
 
@@ -608,13 +646,21 @@ AssemblyGraph::AssemblyGraph(
     const string& largeDataFileNamePrefix,
     size_t largeDataPageSize,
     size_t threadCount,
+    uint64_t readRepresentation,
+    uint64_t k, // Marker length
+    const Reads& reads,
     const MemoryMapped::VectorOfVectors<CompressedMarker, uint64_t>& markers,
-    const MarkerGraph& markerGraph) :
+    const MarkerGraph& markerGraph,
+    const ConsensusCaller& consensusCaller) :
     MultithreadedObject<AssemblyGraph>(*this),
     largeDataFileNamePrefix(largeDataFileNamePrefix),
     largeDataPageSize(largeDataPageSize),
+    readRepresentation(readRepresentation),
+    k(k),
+    reads(reads),
     markers(markers),
-    markerGraph(markerGraph)
+    markerGraph(markerGraph),
+    consensusCaller(consensusCaller)
 {
     // Minimum number of transitions (oriented reads) to create a link.
     // If this equals 1, then the sequence of segments visited by every
@@ -629,7 +675,7 @@ AssemblyGraph::AssemblyGraph(
     // Keep track of the segment and position each marker graph edge corresponds to.
     computeMarkerGraphEdgeTable(threadCount);
 
-    // Compute marker graphand assembly graph journeys of all oriented reads.
+    // Compute marker graph and assembly graph journeys of all oriented reads.
     // We permanently store only the assembly graph journeys.
     computeMarkerGraphJourneys(threadCount);
     computeAssemblyGraphJourneys();
@@ -646,7 +692,7 @@ AssemblyGraph::AssemblyGraph(
     createConnectivity();
     flagBackSegments();
 
-    cout << "The mode 3 assembly graph has " << paths.size() << " segments and " <<
+    cout << "The mode 3 assembly graph has " << markerGraphPaths.size() << " segments and " <<
         links.size() << " links." << endl;
 }
 
@@ -666,14 +712,22 @@ string AssemblyGraph::largeDataName(const string& name) const
 // Constructor from binary data.
 AssemblyGraph::AssemblyGraph(
     const string& largeDataFileNamePrefix,
+    uint64_t readRepresentation,
+    uint64_t k, // Marker length
+    const Reads& reads,
     const MemoryMapped::VectorOfVectors<CompressedMarker, uint64_t>& markers,
-    const MarkerGraph& markerGraph) :
+    const MarkerGraph& markerGraph,
+    const ConsensusCaller& consensusCaller) :
     MultithreadedObject<AssemblyGraph>(*this),
     largeDataFileNamePrefix(largeDataFileNamePrefix),
+    readRepresentation(readRepresentation),
+    k(k),
+    reads(reads),
     markers(markers),
-    markerGraph(markerGraph)
+    markerGraph(markerGraph),
+    consensusCaller(consensusCaller)
 {
-    accessExistingReadOnly(paths, "Mode3-Paths");
+    accessExistingReadOnly(markerGraphPaths, "Mode3-MarkerGraphPaths");
     accessExistingReadOnly(segmentCoverage, "Mode3-SegmentCoverage");
     accessExistingReadOnly(markerGraphEdgeTable, "Mode3-MarkerGraphEdgeTable");
     accessExistingReadOnly(assemblyGraphJourneys, "Mode3-AssemblyGraphJourneys");
@@ -713,6 +767,18 @@ void AssemblyGraph::createConnectivity()
 
 
 
+uint64_t AssemblyGraph::findLink(uint64_t segmentId0, uint64_t segmentId1) const
+{
+    for(const uint64_t linkId: linksBySource[segmentId0]) {
+        if(links[linkId].segmentId1 == segmentId1) {
+            return linkId;
+        }
+    }
+    SHASTA_ASSERT(0);
+}
+
+
+
 // Flag back-segments.
 // This does not do a full blown search for locally strongly connected components.
 // A segment is marked as a back-segment if:
@@ -721,7 +787,7 @@ void AssemblyGraph::createConnectivity()
 // - The incoming and outgoing links both connect to/from the same segment.
 void AssemblyGraph::flagBackSegments()
 {
-    const uint64_t segmentCount = paths.size();
+    const uint64_t segmentCount = markerGraphPaths.size();
     createNew(isBackSegment, "Mode3-IsBackSegment");
     isBackSegment.resize(segmentCount);
 
@@ -827,8 +893,8 @@ void AssemblyGraph::writeGfa(const string& baseName) const
     csv << "Segment,Length,Average coverage,Read count\n";
 
     // Write the segments.
-    for(uint64_t segmentId=0; segmentId<paths.size(); segmentId++) {
-        const auto path = paths[segmentId];
+    for(uint64_t segmentId=0; segmentId<markerGraphPaths.size(); segmentId++) {
+        const auto path = markerGraphPaths[segmentId];
         gfa <<
             "S\t" << segmentId << "\t" <<
             "*\tLN:i:" << path.size() << "\n";
@@ -857,7 +923,7 @@ double AssemblyGraph::findOrientedReadsOnSegment(
     vector<OrientedReadId>& orientedReadIdsArgument) const
 {
     // Loop over the marker graph path corresponding to this segment.
-    const span<const MarkerGraphEdgeId> path = paths[segmentId];
+    const span<const MarkerGraphEdgeId> path = markerGraphPaths[segmentId];
     double coverage = 0.;
     std::set<OrientedReadId> orientedReadIds;
     for(const MarkerGraphEdgeId& edgeId: path) {
@@ -892,7 +958,7 @@ void AssemblyGraph::getOrientedReadsOnSegment(
     std::map<OrientedReadId, pair<uint64_t, int64_t>  > table;
 
     // Loop over the marker graph path corresponding to this segment.
-    const span<const MarkerGraphEdgeId> path = paths[segmentId];
+    const span<const MarkerGraphEdgeId> path = markerGraphPaths[segmentId];
     std::set<OrientedReadId> orientedReadIds;
     for(uint64_t position=0; position<path.size(); position++) {
         const MarkerGraphEdgeId& edgeId = path[position];
@@ -1023,8 +1089,8 @@ void AssemblyGraph::analyzeSegmentPair(
     auto it0 = begin0;
     auto it1 = begin1;
 
-    const uint64_t length0 = paths.size(segmentId0);
-    const uint64_t length1 = paths.size(segmentId1);
+    const uint64_t length0 = markerGraphPaths.size(segmentId0);
+    const uint64_t length1 = markerGraphPaths.size(segmentId1);
     while(true) {
 
         // At end of both segments.
@@ -1102,7 +1168,7 @@ void AssemblyGraph::analyzeSegmentPair(
 // Gather oriented read information for each segment.
 void AssemblyGraph::storeSegmentOrientedReadInformation(size_t threadCount)
 {
-    const uint64_t segmentCount = paths.size();
+    const uint64_t segmentCount = markerGraphPaths.size();
     segmentOrientedReadInformation.resize(segmentCount);
     const uint64_t batchSize = 10;
     setupLoadBalancing(segmentCount, batchSize);
@@ -1129,13 +1195,16 @@ void AssemblyGraph::storeSegmentOrientedReadInformationThreadFunction(size_t thr
     }
 }
 
+
+
+#if 0
 void AssemblyGraph::clusterSegments(size_t threadCount, uint64_t minClusterSize)
 {
     // Gather oriented read information for all segments.
     storeSegmentOrientedReadInformation(threadCount);
 
     // Find the segment pairs.
-    const uint64_t segmentCount = paths.size();
+    const uint64_t segmentCount = markerGraphPaths.size();
     const uint64_t batchSize = 10;
     setupLoadBalancing(segmentCount, batchSize);
     clusterSegmentsData.threadPairs.resize(threadCount);
@@ -1334,6 +1403,7 @@ void AssemblyGraph::addClusterPairs(size_t threadId, uint64_t startSegmentId)
         }
     }
 }
+#endif
 
 
 
@@ -1854,346 +1924,229 @@ vector<uint64_t> AssemblyGraph::AnalyzeSubgraphClasses::Cluster::getSegments() c
 void AssemblyGraph::createAssemblyPath(
     uint64_t startSegmentId,
     uint64_t direction,    // 0 = forward, 1 = backward
-    vector<uint64_t>& path // The segmentId's of the path.
-    ) const
-{
-    createAssemblyPath2(startSegmentId, direction, path);
-}
-
-
-
-// Create an assembly path starting at a given segment.
-void AssemblyGraph::createAssemblyPath1(
-    uint64_t startSegmentId,
-    uint64_t direction,    // 0 = forward, 1 = backward
-    vector<uint64_t>& path // The segmentId's of the path.
-    ) const
-{
-    // CONSTANTS TO EXPOSE WHEN CODE STABILIZES.
-    const uint64_t minimumLinkCoverage = 4;
-    const double minJaccardForReference = 0.8;
-    const uint64_t minCommonForReference = 6;
-
-    const bool debug = true;
-    if(debug) {
-        cout << "Creating an assembly path starting at segment " << startSegmentId <<
-            ", direction "<< direction << endl;
-    }
-
-    // Start with a path consisting only of startSegmentId.
-    path.clear();
-    std::set<uint64_t> pathSet;
-    if(isBackSegment[startSegmentId]) {
-        return;
-    }
-    path.push_back(startSegmentId);
-    pathSet.insert(startSegmentId);
-
-    // The last segment that was added to the path.
-    uint64_t segmentId0 = startSegmentId;
-
-    // Work areas used in the loop below and defined here
-    // to reduce memory allocation activity.
-    vector<uint64_t> childrenOrParents;
-    SegmentOrientedReadInformation referenceOrientedReads;
-    SegmentOrientedReadInformation orientedReads1;
-    vector<SegmentPairInformation> segmentPairInformation;
-    vector<uint64_t> newReferenceCandidates;
-    vector<uint64_t> nextSegmentCandidates;
-
-    // The current reference segment.
-    uint64_t referenceSegmentId = startSegmentId;
-    getOrientedReadsOnSegment(referenceSegmentId, referenceOrientedReads);
-
-    // Main loop. At each step we append one segment to the path.
-    while(true) {
-
-        if(debug) {
-            cout << "Loop iteration begins: "
-                "reference segment " << referenceSegmentId <<
-                ", segmentId0 " << segmentId0 << endl;
-        }
-
-        // Loop over children or parents of segmentId0.
-        // For each, compute SegmentPairInformation relative to
-        // our current reference segment.
-        getChildrenOrParents(segmentId0, direction, minimumLinkCoverage, childrenOrParents);
-        if(childrenOrParents.empty()) {
-            if(debug) {
-                cout << "There are no children or parents." << endl;
-            }
-            return;
-        }
-        segmentPairInformation.resize(childrenOrParents.size());
-        for(uint64_t i=0; i<childrenOrParents.size(); i++) {
-            const uint64_t segmentId1 = childrenOrParents[i];
-            if(isBackSegment[segmentId1]) {
-                continue;
-            }
-            getOrientedReadsOnSegment(segmentId1, orientedReads1);
-            analyzeSegmentPair(referenceSegmentId, segmentId1,
-                referenceOrientedReads, orientedReads1,
-                markers, segmentPairInformation[i]);
-
-            if(debug) {
-                cout << "Segment " << segmentId1 << ": ";
-                if(segmentPairInformation[i].commonCount == 0) {
-                    cout << "no common reads";
-                } else {
-                    cout << "Jaccard " << segmentPairInformation[i].jaccard() <<
-                    ", unexplained fractions " <<
-                    segmentPairInformation[i].unexplainedFraction(0) << " " <<
-                    segmentPairInformation[i].unexplainedFraction(1);
-                }
-                cout << endl;
-            }
-        }
-
-
-
-        // Find the child or parent that has the best Jaccard similarity with
-        // the current reference segment.
-        uint64_t iBest = std::numeric_limits<uint64_t>::max();
-        uint64_t commonBest = 0;
-        double jaccardBest = -1.;
-        for(uint64_t i=0; i<childrenOrParents.size(); i++) {
-            if(isBackSegment[childrenOrParents[i]]) {
-                continue;
-            }
-            const double jaccard = segmentPairInformation[i].jaccard();
-            if(jaccard > jaccardBest) {
-                iBest = i;
-                jaccardBest = jaccard;
-                commonBest = segmentPairInformation[i].commonCount;
-            }
-        }
-        if(iBest == std::numeric_limits<uint64_t>::max()) { // Can happen due to back-segments.
-            return;
-        }
-        if(debug) {
-            cout << "Best Jaccard: segment " << childrenOrParents[iBest] <<
-                ", jaccard " << jaccardBest << endl;
-        }
-
-
-        // Add the best segment to the path.
-        segmentId0 = childrenOrParents[iBest];
-        path.push_back(segmentId0);
-        if(pathSet.contains(segmentId0)) {
-            cout << "Circular path detected at segment " << segmentId0 << endl;
-            return;
-        }
-        pathSet.insert(segmentId0);
-        if(debug) {
-            cout << "Segment " << segmentId0 << " added to the path." << endl;
-        }
-
-        // If good enough, make it a new reference segment.
-        if(jaccardBest > minJaccardForReference and commonBest >= minCommonForReference) {
-            referenceSegmentId = segmentId0;
-            getOrientedReadsOnSegment(referenceSegmentId, referenceOrientedReads);
-            if(debug) {
-                cout << "Segment " << segmentId0 << " is the new reference segment." << endl;
-            }
-        }
-
-
-#if 0
-        // See if any of these children or parents are good enough
-        // to become a new reference segment.
-        // For this, both unexplained fractions must be low.
-        // That is, the read composition of that segment
-        // would be a subset of the read composition of the reference segment.
-        newReferenceCandidates.clear();
-        for(uint64_t i=0; i<childrenOrParents.size(); i++) {
-            if(segmentPairInformation[i].maximumUnexplainedFraction() < unexplainedFractionThresholdForReference) {
-                newReferenceCandidates.push_back(i);
-            }
-        }
-        if(debug) {
-            if(newReferenceCandidates.empty()) {
-                cout << "No new reference candidates." << endl;
-            } else {
-                cout << "New reference candidates:"<< endl;
-                for(const uint64_t i: newReferenceCandidates) {
-                    cout << " " << childrenOrParents[i] << " " <<
-                        segmentPairInformation[i].unexplainedFraction(0) << " " <<
-                        segmentPairInformation[i].unexplainedFraction(1) << " " << endl;
-                }
-            }
-        }
-
-
-        // If there is a single new reference candidate, make it the new
-        // reference and add it to the path.
-        if(newReferenceCandidates.size() == 1) {
-            referenceSegmentId = childrenOrParents[newReferenceCandidates.front()];
-            getOrientedReadsOnSegment(referenceSegmentId, referenceOrientedReads);
-            path.push_back(referenceSegmentId);
-
-            // Keep going from here.
-            segmentId0 = referenceSegmentId;
-            continue;
-        }
-
-
-
-        if(newReferenceCandidates.size() > 1) {
-            if(debug) {
-                cout << "Multiple new reference candidates found." << endl;
-                return;
-            }
-        }
-
-
-
-        // See if any of these children or parents are good enough
-        // to be added to the path, without becoming a new reference segment.
-        // For this, only the first unexplained fractions must be low.
-        // That is, the read composition of that segment
-        // would be a supersetset of the read composition of the reference segment.
-        nextSegmentCandidates.clear();
-        for(uint64_t i=0; i<childrenOrParents.size(); i++) {
-            if(segmentPairInformation[i].unexplainedFraction(0) < unexplainedFractionThreshold) {
-                nextSegmentCandidates.push_back(i);
-            }
-        }
-        if(debug) {
-            if(nextSegmentCandidates.empty()) {
-                cout << "No new segment candidates." << endl;
-            } else {
-                cout << "New segment candidates:";
-                for(const uint64_t i: nextSegmentCandidates) {
-                    cout << " " << childrenOrParents[i] << " " <<
-                        segmentPairInformation[i].unexplainedFraction(0) << " " <<
-                        segmentPairInformation[i].unexplainedFraction(1) << " " << endl;
-                }
-            }
-        }
-
-
-
-        // If there are no next segment candidates, stop here.
-        // Later we will do better.
-        if(nextSegmentCandidates.empty()) {
-            if(debug) {
-                cout << "No next segment candidates." << endl;
-            }
-            return;
-        }
-
-
-        // If there is a single next segment candidate, add it to the path.
-        if(nextSegmentCandidates.size() == 1) {
-            const uint64_t nextSegmentId = childrenOrParents[nextSegmentCandidates.front()];
-            path.push_back(nextSegmentId);
-            segmentId0 = nextSegmentId;
-            continue;
-        }
-
-
-
-        // If there are multiple next segment candidates, stop here.
-        // Later we will do better,
-        if(nextSegmentCandidates.size() > 1) {
-            if(debug) {
-                cout << "Multiple next segment candidates." << endl;
-            }
-            return;
-        }
-#endif
-    }
-}
-
-
-
-// Create an assembly path starting at a given segment.
-void AssemblyGraph::createAssemblyPath2(
-    uint64_t startSegmentId,
-    uint64_t direction,    // 0 = forward, 1 = backward
-    vector<uint64_t>& path // The segmentId's of the path.
+    AssemblyPath& path
     ) const
 {
     // EXPOSE WHEN CODE STABILIZES.
-    const uint64_t maxDistance = 20000;  // Markers.
-    const uint64_t minLinkCoverage = 6;
-    const uint64_t minCommon = 6;
-    const double minJaccard = 0.7;
-    const double maxUnexplainedFraction = 0.25;
+    const uint64_t minCommonForLink = 3;
+    const uint64_t minCommonForReference = 3;
+    const double minJaccard = 0.75;
+    const int32_t minLinkSeparation = -20;
 
-
-    const bool debug = true;
-    if(debug) {
-        cout << "Creating a " <<
-            (direction==0 ? "forward" : "backward") <<
-            " assembly path starting at segment " << startSegmentId << endl;
+    const bool debug = false;
+    if(true) {
+        cout << timestamp << "createAssemblyPath begins at segment " << startSegmentId <<
+            ", direction " << direction << endl;
     }
 
-    // Start with a path consisting only of startSegmentId.
-    path.clear();
-    path.push_back(startSegmentId);
-
-    // Keep track of the milestones reached, to avoid cycles.
-    std::set<uint64_t> milestones;
-    milestones.insert(startSegmentId);
 
 
-
-    // At each iteration, we start from segmentIdA and move
-    // in the specified direction until we find segmentIdB with
+    // At each iteration, we start from segmentIdA (the current "primary segment")
+    // and move in the specified direction until we find segmentIdB with
     // sufficiently high Jaccard similarity and number of
     // common oriented reads with segmentIdA.
-    // Then we fill in a path between segmentIdA and segmentIdB.
-    // When the iteration begins, segmentIdA is the last segment
-    // of the path.
-    uint64_t segmentIdA = startSegmentId;
-    vector<uint64_t> segments;
+    // At each step, we choose the links that has the most common oriented
+    // reads with the current primary segment.
+    uint64_t referenceSegmentId = startSegmentId;
+    SegmentOrientedReadInformation infoReference;
+    getOrientedReadsOnSegment(referenceSegmentId, infoReference);
+    uint64_t segmentId0 = startSegmentId;
+    path.clear();
+    path.segments.push_back(AssemblyPathSegment(startSegmentId, true));
+    vector<uint64_t> lastIterationSegments;
+    std::set< pair<uint64_t, uint64_t> > previousPairs;  // (reference segment, current segment).
     while(true) {
-        uint64_t segmentIdB = findSimilarSegment(
-            segmentIdA, direction,
-            maxDistance, minLinkCoverage, minCommon, maxUnexplainedFraction, minJaccard, segments);
-        SHASTA_ASSERT(not segments.empty());
-        SHASTA_ASSERT(segments.front() == segmentIdA);
-        SHASTA_ASSERT((segmentIdB == invalid<uint64_t>) or (segments.back() == segmentIdB));
 
         if(debug) {
-            cout << "segmentIdA " << segmentIdA << ", segmentIdB " << segmentIdB << endl;
-            cout << "Found the following segments:";
-            for(const uint64_t segmentId: segments) {
-                cout << " " << segmentId;
-            }
-            cout << endl;
+            cout << "Reference segment " << referenceSegmentId <<
+                ", segmentId0 " << segmentId0 << endl;
         }
 
-        // If we did not find a segment with high Jaccard similarity,
-        // the path must end here.
-        if(segmentIdB == invalid<uint64_t>) {
-            break;
-        }
-
-
-        // If this is not the first time we reach this milestone, stop here
-        // to avoid cycles.
-        if(milestones.contains(segmentIdB)) {
+        // Loop over outgoing or incoming links of the current segment.
+        // Find the link with the most common reads with the reference segment.
+        const auto linkIds = (direction == 0) ? linksBySource[segmentId0] : linksByTarget[segmentId0];
+        if(linkIds.empty()) {
             if(debug) {
-                cout << "Previously reached milestone " << segmentIdB << endl;
+                cout << "No links in this direction." << endl;
             }
             break;
         }
+        uint64_t linkIdBest = invalid<uint64_t>;
+        uint64_t commonOrientedReadCountBest = 0;
+        for(const uint64_t linkId: linkIds) {
 
+            // If link separation is too negative, skip it.
+            // The goal here is to avoid cycles in paths.
+            const Link& link = links[linkId];
+            if(link.separation < minLinkSeparation) {
+                continue;
+            }
+
+            // Count the number of common oriented reads between the reference segment and this link.
+            uint64_t commonOrientedReadCount;
+            analyzeSegmentLinkPair(referenceSegmentId, linkId, commonOrientedReadCount);
+
+            // If better than the one we have it, record it.
+            if(commonOrientedReadCount > commonOrientedReadCountBest) {
+                linkIdBest = linkId;
+                commonOrientedReadCountBest = commonOrientedReadCount;
+            }
+        }
+        if(commonOrientedReadCountBest < minCommonForLink) {
+            if(debug) {
+                cout << "No good links found." << endl;
+            }
+            break;
+        }
+        const uint64_t linkId = linkIdBest;
         if(debug) {
-            cout << "Milestone segment " << segmentIdB << endl;
+            cout << "Best link " << linkId <<
+                ", " << commonOrientedReadCountBest <<
+                " common oriented reads with the reference segment." << endl;
         }
 
-        // Add the segments to the path.
-        for(uint64_t i=1; i<segments.size(); i++) {
-            path.push_back(segments[i]);
+        // Get the segment at the other side of this link.
+        const Link& link = links[linkId];
+        const uint64_t segmentId1 = (direction==0) ? link.segmentId1 : link.segmentId0;
+        if(debug) {
+            cout << "segmentId1 " << segmentId1 << endl;
+        }
+        lastIterationSegments.push_back(segmentId1);
+
+        // Check that we haven't been here before.
+        if(previousPairs.contains(make_pair(referenceSegmentId, segmentId1))) {
+            break;
+        }
+        previousPairs.insert(make_pair(referenceSegmentId, segmentId1));
+
+        // Check segmentId1 against the reference segment.
+        SegmentOrientedReadInformation info1;
+        getOrientedReadsOnSegment(segmentId1, info1);
+        SegmentPairInformation info;
+        analyzeSegmentPair(
+            referenceSegmentId, segmentId1,
+            infoReference, info1,
+            markers, info);
+        if(debug) {
+            cout << "Jaccard " << info.jaccard() << endl;
         }
 
-        // Prepare for the next iteration.
-        milestones.insert(segmentIdA);
-        segmentIdA = segmentIdB;
+        // If the Jaccard similarity is high, this becomes the new reference segment.
+        if(info.commonCount >= minCommonForReference and info.rawJaccard() >= minJaccard) { // ****** USING RAWJACCARD INSTEAD OF JACCARD
+            referenceSegmentId = segmentId1;
+            getOrientedReadsOnSegment(referenceSegmentId, infoReference);
+            const uint64_t lastPrimarySegmentId = path.segments.back().id;
+            if(debug) {
+                cout << "New reference segment is " << segmentId1 << endl;
+                cout << "Previous reference segment is " << lastPrimarySegmentId << endl;
+            }
+            for(const uint64_t segmentId: lastIterationSegments) {
+                path.segments.push_back(AssemblyPathSegment(segmentId, false));
+                if(debug) {
+                    cout << "Added segment " << segmentId << " to path." << endl;
+                }
+                if(segmentId != segmentId1) {
+                    if(direction == 0) {
+                        path.segments.back().previousPrimarySegmentId = lastPrimarySegmentId;
+                        path.segments.back().nextPrimarySegmentId = segmentId1;
+                    } else {
+                        path.segments.back().previousPrimarySegmentId = segmentId1;
+                        path.segments.back().nextPrimarySegmentId = lastPrimarySegmentId;
+                    }
+                }
+            }
+            path.segments.back().isPrimary = true;
+            lastIterationSegments.clear();
+        }
+
+        segmentId0 = segmentId1;
     }
+
+
+
+    if(true) {
+        cout << timestamp << "createAssemblyPath3 ends." << endl;
+    }
+}
+
+
+
+// Count the number of common oriented reads between a segment and a link,
+// without counting oriented reads that appear more than once on the
+// segment or on the link.
+void AssemblyGraph::analyzeSegmentLinkPair(
+    uint64_t segmentId,
+    uint64_t linkId,
+    uint64_t& commonOrientedReadCount
+) const
+{
+    // The oriented reads in this segment,
+    // with some extra information that we don't care about here.
+    const auto segmentOrientedReads = assemblyGraphJourneyInfos[segmentId];
+
+    // The oriented reads in this link,
+    // with some extra information that we don't care about here.
+    const auto linkOrientedReads = transitions[linkId];
+
+    // Joint loop over oriented reads.
+    commonOrientedReadCount = 0;
+    const auto segmentBegin = segmentOrientedReads.begin();
+    const auto segmentEnd = segmentOrientedReads.end();
+    const auto linkBegin = linkOrientedReads.begin();
+    const auto linkEnd = linkOrientedReads.end();
+    auto itSegment = segmentBegin;
+    auto itLink = linkBegin;
+    while(itSegment != segmentEnd and itLink != linkEnd) {
+
+        if(itSegment->first < itLink->first) {
+            ++itSegment;
+            continue;
+        }
+        if(itLink->first < itSegment->first) {
+            ++itLink;
+            continue;
+        }
+        SHASTA_ASSERT(itSegment->first == itLink->first);
+
+        // If it appears more than once in the segment, skip it.
+        auto itSegmentNext = itSegment + 1;
+        if(itSegmentNext != segmentEnd and  itSegmentNext->first == itSegment->first) {
+            ++itSegment;
+            ++itLink;
+            continue;
+        }
+        if(itSegment != segmentBegin) {
+            auto itSegmentPrevious = itSegment - 1;
+            if(itSegmentPrevious->first == itSegment->first) {
+                ++itSegment;
+                ++itLink;
+                continue;
+            }
+        }
+
+        // If it appears more than once in the link, skip it.
+        auto itLinkNext = itLink + 1;
+        if(itLinkNext != linkEnd and  itLinkNext->first == itLink->first) {
+            ++itSegment;
+            ++itLink;
+            continue;
+        }
+        if(itLink != linkBegin) {
+             auto itLinkPrevious = itLink - 1;
+            if(itLinkPrevious->first == itLink->first) {
+                ++itSegment;
+                ++itLink;
+                continue;
+            }
+        }
+
+        // Ok, this is a common oriented read that appears only once
+        // in both the segment and the link.
+        ++commonOrientedReadCount;
+        ++itSegment;
+        ++itLink;
+    }
+
 }
 
 
@@ -2320,6 +2273,7 @@ uint64_t AssemblyGraph::findSimilarSegment(
     uint64_t direction,     // 0 = forward, 1 = backward
     uint64_t maxDistance,   // In markers
     uint64_t minLinkCoverage,
+    int32_t minLinkSeparation,
     uint64_t minCommon,
     double maxUnexplainedFraction,
     double minJaccard,
@@ -2391,8 +2345,14 @@ uint64_t AssemblyGraph::findSimilarSegment(
                 continue;
             }
 
-            // Get the segment at the other side of this link.
+            // If link separation is too negative, skip it.
+            // The goal here is to avoid cycles in paths.
             const Link& link = links[linkId];
+            if(link.separation < minLinkSeparation) {
+                continue;
+            }
+
+            // Get the segment at the other side of this link.
             const uint64_t segmentId1 = (direction==0) ? link.segmentId1 : link.segmentId0;
             if(debug) {
                 cout << "Found " << segmentId1 << endl;
@@ -2539,3 +2499,4 @@ void AssemblyGraph::targetedBfs(
     }
 
 }
+

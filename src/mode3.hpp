@@ -16,7 +16,6 @@ number of transitions 0->1, we create a link 0->1.
 *******************************************************************************/
 
 // Shasta.
-#include "hashArray.hpp"
 #include "invalid.hpp"
 #include "MemoryMappedVectorOfVectors.hpp"
 #include "MultithreadedObject.hpp"
@@ -28,6 +27,7 @@ number of transitions 0->1, we create a link 0->1.
 
 // Standard library.
 #include "array.hpp"
+#include "memory.hpp"
 #include "tuple.hpp"
 #include "unordered_map"
 #include "vector.hpp"
@@ -40,10 +40,19 @@ namespace shasta {
         class AssemblyGraphJourneyEntry;
         class MarkerGraphJourneyEntry;
         class AssemblyGraphJourneyInterval;
+        class AssemblyPath;
+        class JaccardGraph;
+        class JaccardGraphEdgeInfo;
+        class SegmentPairInformation;
+        class Transition;
 
     }
 
     // Some forward declarations of classes in the shasta namespace.
+    class AssembledSegment;
+    class Base;
+    class ConsensusCaller;
+    class Reads;
     class CompressedMarker;
     class MarkerGraph;
 
@@ -132,6 +141,20 @@ public:
 
 
 
+// A transition is a sequence of two consecutive positions
+// in the assembly graph journey of an oriented reads.
+// In other words, it describes the transition of an oriented read
+// from a segment to the next segment it encounters.
+// Transitions are used to create edges in the AssemblyGraph (gfa links).
+// Indexed by the linkId. For each link, they are sorted.
+class shasta::mode3::Transition : public array<MarkerGraphJourneyEntry, 2> {
+public:
+    Transition(const array<MarkerGraphJourneyEntry, 2>& x) : array<MarkerGraphJourneyEntry, 2>(x) {}
+    Transition() {}
+};
+
+
+
 // The AssemblyGraph is used to store the Mode 3 assembly graph,
 // when it no longer needs to be changed,
 // in memory mapped data structures.
@@ -144,14 +167,22 @@ public:
         const string& largeDataFileNamePrefix,
         size_t largeDataPageSize,
         size_t threadCount,
+        uint64_t readRepresentation,
+        uint64_t k, // Marker length
+        const Reads& reads,
         const MemoryMapped::VectorOfVectors<CompressedMarker, uint64_t>& markers,
-        const MarkerGraph&);
+        const MarkerGraph&,
+        const ConsensusCaller& consensusCaller);
 
     // Constructor from binary data.
     AssemblyGraph(
         const string& largeDataFileNamePrefix,
+        uint64_t readRepresentation,
+        uint64_t k, // Marker length
+        const Reads& reads,
         const MemoryMapped::VectorOfVectors<CompressedMarker, uint64_t>& markers,
-        const MarkerGraph&);
+        const MarkerGraph&,
+        const ConsensusCaller& consensusCaller);
 
     // Data and functions to handle memory mapped data.
     const string& largeDataFileNamePrefix;
@@ -166,9 +197,13 @@ public:
         t.accessExistingReadOnly(largeDataName(name));
     }
 
-    // References to Assembler objects.
+    // References or copies for Assembler objects.
+    uint64_t readRepresentation;
+    uint64_t k;
+    const Reads& reads;
     const MemoryMapped::VectorOfVectors<CompressedMarker, uint64_t>& markers;
     const MarkerGraph& markerGraph;
+    const ConsensusCaller& consensusCaller;
 
     uint64_t readCount() const
     {
@@ -178,7 +213,7 @@ public:
     // Each  linear chain of marker graph edges generates a segment.
     // The marker graph path corresponding to each segment is stored
     // indexed by segment id.
-    MemoryMapped::VectorOfVectors<MarkerGraphEdgeId, uint64_t> paths;
+    MemoryMapped::VectorOfVectors<MarkerGraphEdgeId, uint64_t> markerGraphPaths;
     void createSegmentPaths();
 
     // Average marker graph edge coverage for all segments.
@@ -219,22 +254,27 @@ public:
     // Store appearances of segments in assembly graph journeys.
     // For each segment, store pairs (orientedReadId, position in assembly graph journey).
     // Indexed by the segmentId.
+    // For each segment, they are sorted.
     MemoryMapped::VectorOfVectors<pair<OrientedReadId, uint64_t>, uint64_t>
         assemblyGraphJourneyInfos;
     void computeAssemblyGraphJourneyInfos();
 
+    //Coverage is th enumber of oriented reads that appear in this segment.
+    // This is not the same as average coverage on marker graph vertices or edges.
+    uint64_t coverage(uint64_t segmentId) const
+    {
+        return assemblyGraphJourneyInfos.size(segmentId);
+    }
+
+    // Find out if a segment contains a given OrientedReadId.
+    // This returns true if assemblyGraphJourneyInfos[segmentId]
+    // contains an entry with the given OrientedReadId.
+    bool segmentContainsOrientedRead(
+        uint64_t segmentId,
+        OrientedReadId) const;
 
 
-    // A transition is a sequence of two consecutive positions
-    // in the assembly graph journey of an oriented reads.
-    // In other words, it describes the transition of an oriented read
-    // from a segment to the next segment it encounters.
-    // Transitions are used to create edges in the AssemblyGraph (gfa links).
-    class Transition : public array<MarkerGraphJourneyEntry, 2> {
-    public:
-        Transition(const array<MarkerGraphJourneyEntry, 2>& x) : array<MarkerGraphJourneyEntry, 2>(x) {}
-        Transition() {}
-    };
+
     using SegmentPair = pair<uint64_t, uint64_t>;
     using Transitions = vector< pair<OrientedReadId, Transition> >;
     std::map<SegmentPair, Transitions> transitionMap;
@@ -284,6 +324,7 @@ public:
     MemoryMapped::VectorOfVectors<uint64_t, uint64_t> linksBySource;
     MemoryMapped::VectorOfVectors<uint64_t, uint64_t> linksByTarget;
     void createConnectivity();
+    uint64_t findLink(uint64_t segmentId0, uint64_t segmentId1) const;
 
 
     // Flag back-segments.
@@ -399,56 +440,6 @@ public:
 
     // Analyze a pair of segments for common oriented reads,
     // offsets, missing reads, etc.
-    class SegmentPairInformation {
-    public:
-
-        // The total number of oriented reads present in each segment.
-        array<uint64_t, 2> totalCount = {0, 0};
-
-        // The number of oriented reads present in both segments.
-        // If this is zero, the rest of the information is not valid.
-        uint64_t commonCount = 0;
-
-        // The offset of segment 1 relative to segment 0, in markers.
-        int64_t offset = invalid<int64_t>;
-
-        // The number of oriented reads present in each segment
-        // but missing from the other segment,
-        // and which should have been present based on the above estimated offset.
-        array<uint64_t, 2> unexplainedCount = {0, 0};
-
-        // The number of oriented reads that appear in only one
-        // of the two segments, but based on the estimated offset
-        // are too short to appear in the other segment.
-        array<uint64_t, 2> shortCount = {0, 0};
-
-        // Check that the above counts are consistent.
-        void check() const
-        {
-            for(uint64_t i=0; i<2; i++) {
-                SHASTA_ASSERT(commonCount + unexplainedCount[i] + shortCount[i] ==
-                    totalCount[i]);
-            }
-        }
-
-        // This computes the fraction of unexplained oriented reads,
-        // without counting the short ones.
-        double unexplainedFraction(uint64_t i) const
-        {
-            // return double(unexplainedCount[i]) / double(totalCount[i]);
-            return double(unexplainedCount[i]) / double(commonCount + unexplainedCount[i]);
-        }
-        double maximumUnexplainedFraction() const
-        {
-            return max(unexplainedFraction(0), unexplainedFraction(1));
-        }
-
-        // Jaccard similarity, without counting the short reads.
-        double jaccard() const
-        {
-            return double(commonCount) / double(commonCount + unexplainedCount[0] + unexplainedCount[1]);
-        }
-    };
     void analyzeSegmentPair(
         uint64_t segmentId0,
         uint64_t segmentId1,
@@ -458,8 +449,18 @@ public:
         SegmentPairInformation&
         ) const;
 
+    // Count the number of common oriented reads between a segment and a link,
+    // without counting oriented reads that appear more than once on the
+    // segment or on the link.
+    void analyzeSegmentLinkPair(
+        uint64_t segmentId,
+        uint64_t linkId,
+        uint64_t& commonOrientedReadCount
+    ) const;
 
 
+
+#if 0
     // Find segment pairs a sufficient number of common reads
     // and with low unexplained fraction (in both directions)
     // between segmentId0 and one of its descendants within the specified distance.
@@ -472,7 +473,6 @@ public:
         double maxUnexplainedFraction,
         vector<uint64_t>& segmentIds1
     ) const;
-
 
 
     // Cluster the segments based on read composition.
@@ -489,6 +489,10 @@ public:
     ClusterSegmentsData clusterSegmentsData;
     void clusterSegmentsThreadFunction1(size_t threadId);
     void addClusterPairs(size_t threadId, uint64_t segmentId0);
+#endif
+
+    // The cluster that each segment belongs to.
+    // Each connected component of the Jaccard graph corresponds to a cluster.
     MemoryMapped::Vector<uint64_t> clusterIds;
 
 
@@ -605,6 +609,7 @@ public:
         uint64_t direction,     // 0 = forward, 1 = backward
         uint64_t maxDistance,   // In markers
         uint64_t minLinkCoverage,
+        int32_t minLinkSeparation,
         uint64_t minCommon,
         double maxUnexplainedFraction,
         double minJaccard,
@@ -614,20 +619,8 @@ public:
     void createAssemblyPath(
         uint64_t segmentId,
         uint64_t direction,    // 0 = forward, 1 = backward
-        vector<uint64_t>& path // The segmentId's of the path.
+        AssemblyPath&
         ) const;
-    void createAssemblyPath1(
-        uint64_t segmentId,
-        uint64_t direction,    // 0 = forward, 1 = backward
-        vector<uint64_t>& path // The segmentId's of the path.
-        ) const;
-    void createAssemblyPath2(
-        uint64_t segmentId,
-        uint64_t direction,    // 0 = forward, 1 = backward
-        vector<uint64_t>& path // The segmentId's of the path.
-        ) const;
-
-
 
     // Compute link separation given a set of Transitions.
     template<class Container> static double linkSeparation(
@@ -653,6 +646,18 @@ public:
 
         return averageLinkSeparation;
     }
+
+    // Jaccard graph.
+    shared_ptr<JaccardGraph> jaccardGraphPointer;
+    void createJaccardGraph(size_t threadCount);
+    void createJaccardGraphThreadFunction(size_t threadId);
+    void createJaccardGraphEdges(
+        uint64_t segmentId,
+        vector<JaccardGraphEdgeInfo>& edges);
+    void createJaccardGraphEdges(
+        uint64_t segmentId,
+        uint64_t direction,
+        vector<JaccardGraphEdgeInfo>& edges);
 };
 
 

@@ -2380,6 +2380,8 @@ private:
     void exploreMode3AssemblyGraphSegmentPair(const vector<string>&, ostream&);
     void exploreMode3AssemblyGraphLink(const vector<string>&, ostream&);
     void exploreMode3MetaAlignment(const vector<string>&, ostream&);
+    void exploreMode3AssemblyPath(const vector<string>&, ostream&);
+    void exploreMode3LinkAssembly(const vector<string>&, ostream&);
 
 
 
@@ -2419,9 +2421,6 @@ public:
     shared_ptr<mode3::AssemblyGraph> assemblyGraph3Pointer;
     void accessMode3AssemblyGraph();
     void analyzeMode3Subgraph(const vector<uint64_t>& segmentIds);
-    vector<uint64_t> createMode3AssemblyPath(
-        uint64_t segmentId,
-        uint64_t direction) const;
     void createMode3PathGraph();
 
 

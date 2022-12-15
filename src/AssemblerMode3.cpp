@@ -11,7 +11,7 @@ void Assembler::mode3Assembly(
     size_t threadCount)
 {
     // EXPOSE WHEN CODE STABILIZES.
-    const uint64_t minClusterSize = 3;
+    // const uint64_t minClusterSize = 3;
 
     // Adjust the numbers of threads, if necessary.
     if(threadCount == 0) {
@@ -22,11 +22,16 @@ void Assembler::mode3Assembly(
         largeDataFileNamePrefix,
         largeDataPageSize,
         threadCount,
+        assemblerInfo->readRepresentation,
+        assemblerInfo->k,
+        *reads,
         markers,
-        markerGraph);
+        markerGraph,
+        *consensusCaller);
     auto& assemblyGraph3 = *assemblyGraph3Pointer;
     assemblyGraph3.writeGfa("AssemblyGraph");
-    assemblyGraph3.clusterSegments(threadCount, minClusterSize);
+    // assemblyGraph3.clusterSegments(threadCount, minClusterSize);
+    assemblyGraph3.createJaccardGraph(threadCount);
 
 }
 
@@ -34,7 +39,11 @@ void Assembler::mode3Assembly(
 
 void Assembler::accessMode3AssemblyGraph()
 {
-    assemblyGraph3Pointer = std::make_shared<mode3::AssemblyGraph>(largeDataFileNamePrefix, markers, markerGraph);
+    assemblyGraph3Pointer = std::make_shared<mode3::AssemblyGraph>(
+        largeDataFileNamePrefix,
+        assemblerInfo->readRepresentation,
+        assemblerInfo->k,
+        *reads, markers, markerGraph, *consensusCaller);
 }
 
 
@@ -44,20 +53,6 @@ void Assembler::analyzeMode3Subgraph(const vector<uint64_t>& segmentIds)
     SHASTA_ASSERT(assemblyGraph3Pointer);
     vector<mode3::AssemblyGraph::AnalyzeSubgraphClasses::Cluster> clusters;
     assemblyGraph3Pointer->analyzeSubgraph(segmentIds, clusters, true);
-}
-
-
-
-vector<uint64_t> Assembler::createMode3AssemblyPath(
-    uint64_t segmentId,
-    uint64_t direction) const
-{
-    SHASTA_ASSERT(assemblyGraph3Pointer);
-
-    vector<uint64_t> path;
-    assemblyGraph3Pointer->createAssemblyPath(segmentId, direction, path);
-    return path;
-
 }
 
 

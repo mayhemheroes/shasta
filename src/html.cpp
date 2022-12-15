@@ -65,7 +65,13 @@ void shasta::writeStyle(ostream& html)
     a {
         color: DarkSlateBlue;
     }
-    
+
+    /* This can be used to get vertical text in table cells. */
+    span.rotated 
+    {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+    }
 </style>
     )%";
 
@@ -82,7 +88,7 @@ var svg = document.querySelector('svg');
 svg.scrollIntoView();
 svg.addEventListener('pointerdown', onPointerDown); 
 svg.addEventListener('pointerup', onPointerUp); 
-svg.addEventListener('pointerleave', onPointerUp); 
+svg.addEventListener('pointerleave', onPointerLeave); 
 svg.addEventListener('pointermove', onPointerMove); 
 svg.addEventListener('wheel', onMouseWheel); 
 
@@ -137,14 +143,29 @@ function onPointerUp(event) {
     return false;
 }
 
+function onPointerLeave(event) {
+    event.stopPropagation();
+    event.preventDefault();
+    if(pointerIsDown) {
+        pointerIsDown = false;
+        x = xNew;
+        y = yNew;
+    }
+
+    return false;
+}
+
 function onMouseWheel(event) {
     event.stopPropagation();
     event.preventDefault();  
     var value = event.wheelDelta / 120.;
     var factor = Math.pow(1.1, value);
-    ratio /= factor;
+    zoomSvg(factor);
+}
 
-    var viewBoxString = `${x} ${y} ${width} ${height}`;
+function zoomSvg(factor)
+{
+    ratio /= factor;
 
     // Adjust the viewbox so the center does not move.
     var xCenter = x + 0.5 * width;

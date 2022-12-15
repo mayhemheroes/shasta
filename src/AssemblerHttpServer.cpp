@@ -246,6 +246,8 @@ void Assembler::fillServerFunctionTable()
     SHASTA_ADD_TO_FUNCTION_TABLE(exploreMode3AssemblyGraphSegmentPair);
     SHASTA_ADD_TO_FUNCTION_TABLE(exploreMode3AssemblyGraphLink);
     SHASTA_ADD_TO_FUNCTION_TABLE(exploreMode3MetaAlignment);
+    SHASTA_ADD_TO_FUNCTION_TABLE(exploreMode3AssemblyPath);
+    SHASTA_ADD_TO_FUNCTION_TABLE(exploreMode3LinkAssembly);
 
 }
 #undef SHASTA_ADD_TO_FUNCTION_TABLE
@@ -464,6 +466,7 @@ void Assembler::writeNavigation(ostream& html) const
             {"Assembly graph segment pairs", "exploreMode3AssemblyGraphSegmentPair"},
             {"Assembly graph links", "exploreMode3AssemblyGraphLink"},
             {"Meta-alignments", "exploreMode3MetaAlignment"},
+            {"Assembly paths", "exploreMode3AssemblyPath"},
             });
     }
 
@@ -781,6 +784,14 @@ void Assembler::writeStyle(ostream& html)
     a {
         color: DarkSlateBlue;
     }
+
+    /* This can be used to get vertical text in table cells. */
+    span.rotated 
+    {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+    }
+
     ul.navigationMenu {
         list-style-type: none;
         margin: 0px 0px 12px 0px;
@@ -788,7 +799,7 @@ void Assembler::writeStyle(ostream& html)
         overflow: hidden;
         background-color: #404040;
     }
-    
+
     div.navigationButton {
         display: inline-block;
         color: white;
@@ -797,7 +808,7 @@ void Assembler::writeStyle(ostream& html)
         text-decoration: none;
         // min-width: 120px;
     }
-    
+
     .navigationMenuEntry:hover .navigationButton {
         background-color: black;
     }
