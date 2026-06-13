@@ -3,3 +3,4 @@ target: shasta
 
 cmds:
   - cmd: /shasta --config Nanopore-May2022 --input @@ --assemblyDirectory in
+    filepath: /test.fa
